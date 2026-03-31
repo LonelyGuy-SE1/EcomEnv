@@ -1,8 +1,8 @@
 ---
 title: Ecom Environment Server
-emoji: 🥈
+emoji: 🎻
 colorFrom: indigo
-colorTo: blue
+colorTo: yellow
 sdk: docker
 pinned: false
 app_port: 8000
