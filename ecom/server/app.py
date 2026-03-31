@@ -35,12 +35,9 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
-try:
-    from ..models import EcomAction, EcomObservation
-    from .ecom_environment import EcomEnvironment
-except ModuleNotFoundError:
-    from models import EcomAction, EcomObservation
-    from server.ecom_environment import EcomEnvironment
+
+from ecom.models import EcomAction, EcomObservation
+from ecom.server.ecom_environment import EcomEnvironment
 
 
 # Create the app with web interface and README integration

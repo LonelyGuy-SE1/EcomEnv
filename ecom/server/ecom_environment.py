@@ -16,10 +16,8 @@ from uuid import uuid4
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
-try:
-    from ..models import EcomAction, EcomObservation
-except ImportError:
-    from models import EcomAction, EcomObservation
+
+from ecom.models import EcomAction, EcomObservation
 
 
 class EcomEnvironment(Environment):

@@ -1,0 +1,2 @@
+[console_scripts]
+server = ecom.server.app:main
