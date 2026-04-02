@@ -1,8 +1,8 @@
 ---
 title: E-commerce Returns Decision Environment
 emoji: 📦
-colorFrom: orange
-colorTo: teal
+colorFrom: blue
+colorTo: green
 sdk: docker
 pinned: false
 app_port: 8000
