@@ -1,255 +1,252 @@
 ---
-title: Ecom Environment Server
-emoji: 🎻
-colorFrom: indigo
-colorTo: yellow
+title: E-commerce Returns Decision Environment
+emoji: 📦
+colorFrom: orange
+colorTo: teal
 sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
 tags:
   - openenv
+  - operations
+  - decision-making
 ---
 
-# Ecom Environment
+# E-commerce Returns Decision Environment
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+This environment simulates a real operations workflow in online retail: deciding how to handle customer return requests under policy constraints, latent fraud risk, and financial trade-offs.
 
-## Quick Start
+It is designed as a **partially observable decision problem**, not a classification toy.
 
-The simplest way to use the Ecom environment is through the `EcomEnv` class:
+## Why this environment matters
 
-```python
-from ecom import EcomAction, EcomEnv
+Returns handling is a major cost center in e-commerce.
 
-try:
-    # Create environment from Docker image
-    ecomenv = EcomEnv.from_docker_image("ecom-env:latest")
+In production settings, an operations associate (or AI agent) must balance:
 
-    # Reset
-    result = ecomenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
+- customer satisfaction,
+- policy compliance,
+- fraud prevention,
+- and cost efficiency.
 
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
+This environment captures that exact tension with structured observations, hidden variables, and deterministic graders.
 
-    for msg in messages:
-        result = ecomenv.step(EcomAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
+## Environment API (OpenEnv)
 
-finally:
-    # Always clean up
-    ecomenv.close()
-```
+The environment follows the OpenEnv simulation API:
 
-That's it! The `EcomEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
+- `reset(...)` -> initial observation
+- `step(action)` -> observation, reward, done, info
+- `state` -> current episode state
 
-## Building the Docker Image
+The `step` info channel is exposed via `observation.info`.
 
-Before using the environment, you need to build the Docker image:
+## Action space
+
+`EcomAction`:
+
+- `action_type`: one of `APPROVE`, `REJECT`, `ESCALATE`, `REQUEST_INFO`
+- `reason_code`: required only when `action_type == REJECT`
+  - `TIME_EXPIRED`
+  - `POLICY_VIOLATION`
+  - `SUSPECTED_FRAUD`
+
+## Observation space
+
+`EcomObservation` fields:
+
+- `return_reason`
+- `product_category`
+- `product_value` (`low | medium | high`)
+- `days_since_purchase`
+- `user_account_age_days`
+- `product_condition_notes`
+- `return_rate` (0.0 to 1.0)
+- `total_orders`
+- `policy_summary` (plain text, includes rules and exceptions)
+- `info` (step metadata)
+
+No identifier-only fields are included in the observation.
+
+## Hidden state (grader-only)
+
+The environment keeps the following latent variables hidden from the agent:
+
+- `fraud_risk_score`
+- `true_intent` (`genuine` or `abusive`)
+- `cost_impact` by candidate action
+- `optimal_action`
+
+These are used to compute scores/rewards and evaluate decision quality.
+
+## Episode flow and boundaries
+
+- One request per episode.
+- `APPROVE`, `REJECT`, `ESCALATE` are terminal actions (`done=True`).
+- `REQUEST_INFO` is non-terminal on first use and deterministically refines existing observation fields:
+  - `product_condition_notes`
+  - `return_reason` (optional refinement)
+  - slight refinement of `return_rate`
+- No new fields are introduced after `REQUEST_INFO`.
+
+## Scenario generation
+
+Scenarios are generated programmatically from controlled distributions.
+
+The generator includes mandatory realism correlations:
+
+- higher `return_rate` -> higher fraud likelihood,
+- lower `return_rate` -> lower fraud likelihood,
+- higher `product_value` -> higher fraud likelihood,
+- lower `product_value` -> lower fraud likelihood.
+
+Difficulty is not just fraud probability; it also changes ambiguity and signal conflict.
+
+## Reward design
+
+Reward is deterministic and normalized to `[0.0, 1.0]`.
+
+1. **Policy gate** (hard constraint)
+   - policy violation => reward `0.0`
+2. Component scores are bounded independently:
+   - `financial_score in [0,1]`
+   - `fraud_score in [0,1]`
+   - `efficiency_score in [0,1]`
+3. Weighted final score:
+   - `0.5 * financial + 0.3 * fraud + 0.2 * efficiency`
+
+This avoids overflow and grader instability.
+
+## Tasks and graders (easy -> medium -> hard)
+
+The environment ships with 3 deterministic benchmark tasks, each with fixed seed + threshold:
+
+1. `easy_policy_compliance`
+   - clear low-risk case
+   - success threshold: `0.75`
+2. `medium_balanced_judgment`
+   - ambiguous policy/risk trade-off
+   - success threshold: `0.68`
+3. `hard_conflicting_signals`
+   - high-value conflicting signals + exception pressure
+   - success threshold: `0.62`
+
+Terminal observation includes grader outputs in `info`:
+
+- `grader_score` (0.0 to 1.0)
+- `grader_success` (bool)
+- detailed component `breakdown`
+
+## Quick start
+
+### Local dev server
 
 ```bash
-# From project root
+uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Python usage
+
+```python
+import asyncio
+from ecom import EcomAction, EcomEnv
+
+
+async def run():
+    env = await EcomEnv.from_docker_image("ecom-env:latest")
+    try:
+        result = await env.reset(task_name="medium_balanced_judgment")
+        # optional extra context
+        result = await env.step(EcomAction(action_type="REQUEST_INFO"))
+        # final decision
+        result = await env.step(EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD"))
+        print(result.reward, result.done, result.observation.info)
+    finally:
+        await env.close()
+
+
+asyncio.run(run())
+```
+
+## Baseline inference
+
+`inference.py` is at repo root as required.
+
+Required env vars:
+
+- `MODEL_NAME`
+- `LOCAL_IMAGE_NAME`
+- `HF_TOKEN` (or `OPENAI_API_KEY`)
+
+Optional:
+
+- `API_BASE_URL` (defaults to `https://api.openai.com/v1`)
+
+Run:
+
+```bash
+python inference.py
+```
+
+The script emits strict structured logs:
+
+- `[START] ...`
+- `[STEP] ...`
+- `[END] ...`
+
+### Reproducible baseline scores
+
+Current deterministic baseline (heuristic fallback) on default task seeds:
+
+- `easy_policy_compliance`: `0.7997`
+- `medium_balanced_judgment`: `0.8388`
+- `hard_conflicting_signals`: `0.8253`
+
+## Hugging Face Spaces deployment
+
+From `ecom/`:
+
+```bash
+openenv push
+```
+
+Or explicit options:
+
+```bash
+openenv push --repo-id <namespace>/<space-name> --private
+```
+
+## Docker
+
+Build from the environment root (`ecom/`):
+
+```bash
 docker build -t ecom-env:latest -f server/Dockerfile .
 ```
 
-## Deploying to Hugging Face Spaces
-
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+Run:
 
 ```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
-
-# Or specify options
-openenv push --namespace my-org --private
+docker run --rm -p 8000:8000 ecom-env:latest
 ```
 
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
-
-### Prerequisites
-
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
-
-### Options
-
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
-
-### Examples
+Health check:
 
 ```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
-
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
-
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
-
-# Push as a private space
-openenv push --private
-
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
+curl http://localhost:8000/health
 ```
 
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
+## Validation
 
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
-
-## Environment Details
-
-### Action
-**EcomAction**: Contains a single field
-- `message` (str) - The message to echo back
-
-### Observation
-**EcomObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
-
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Ecom environment server running, you can connect directly:
-
-```python
-from ecom import EcomEnv
-
-# Connect to existing server
-ecomenv = EcomEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = ecomenv.reset()
-result = ecomenv.step(EcomAction(message="Hello!"))
-```
-
-Note: When connecting to an existing server, `ecomenv.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from ecom import EcomAction, EcomEnv
-
-# Connect with context manager (auto-connects and closes)
-with EcomEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(EcomAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    EcomEnvironment,  # Pass class, not instance
-    EcomAction,
-    EcomObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
-```
-
-Then multiple clients can connect simultaneously:
-
-```python
-from ecom import EcomAction, EcomEnv
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with EcomEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(EcomAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
+From `ecom/`:
 
 ```bash
-# From the server directory
-python3 server/ecom_environment.py
+openenv validate .
 ```
 
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
+Optional pre-check from repository root:
 
 ```bash
-uvicorn server.app:app --reload
-```
-
-## Project Structure
-
-```
-ecom/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # EcomEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── ecom_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
+./validate-submission.sh <your-space-url> .
 ```

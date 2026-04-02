@@ -27,6 +27,9 @@ ARG ENV_NAME=ecom
 # Copy environment code (always at root of build context)
 COPY . /app/env
 
+# Remove host virtual environment if present in build context.
+RUN rm -rf /app/env/.venv
+
 # For in-repo builds, openenv is already vendored in the build context
 # For standalone builds, openenv will be installed via pyproject.toml
 WORKDIR /app/env
