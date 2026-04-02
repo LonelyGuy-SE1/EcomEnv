@@ -31,7 +31,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 API_KEY = OPENAI_API_KEY or HF_TOKEN or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "ecom-env:latest")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
 
 BENCHMARK = os.getenv("ECOM_BENCHMARK", "ecom_returns_decision")
@@ -250,6 +250,10 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
             env = EcomEnv(base_url=ENV_BASE_URL)
             await env.connect()
         else:
+            if not LOCAL_IMAGE_NAME:
+                raise RuntimeError(
+                    "LOCAL_IMAGE_NAME is required when ENV_BASE_URL is not set"
+                )
             env = await EcomEnv.from_docker_image(LOCAL_IMAGE_NAME)
 
         result = await env.reset(task_name=task_name)
@@ -265,7 +269,7 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
 
             reward = float(result.reward or 0.0)
             done = bool(result.done)
-            error = _extract_last_action_error(observation)
+            error = _extract_last_action_error(result.observation)
 
             rewards.append(reward)
             steps_taken = step
@@ -293,7 +297,7 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
 
             reward = float(result.reward or 0.0)
             done = bool(result.done)
-            error = _extract_last_action_error(observation)
+            error = _extract_last_action_error(result.observation)
 
             rewards.append(reward)
             steps_taken = step
