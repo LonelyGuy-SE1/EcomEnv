@@ -15,10 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from openenv.core.client_types import StepResult
-
 from ecom import EcomAction, EcomEnv
-from ecom.server.ecom_environment import EcomEnvironment
 
 try:
     from openai import OpenAI
@@ -50,25 +47,6 @@ class EpisodeOutcome:
     success: bool
     steps: int
     rewards: List[float]
-
-
-class LocalEnvRunner:
-    """Fallback runner when Docker or remote endpoint is unavailable."""
-
-    def __init__(self, mode: str = "medium"):
-        self._env = EcomEnvironment(mode=mode)  # type: ignore[arg-type]
-
-    async def reset(self, **kwargs: Any) -> StepResult[Any]:
-        obs = self._env.reset(**kwargs)
-        return StepResult(observation=obs, reward=obs.reward, done=obs.done)
-
-    async def step(self, action: EcomAction, **kwargs: Any) -> StepResult[Any]:
-        del kwargs
-        obs = self._env.step(action)
-        return StepResult(observation=obs, reward=obs.reward, done=obs.done)
-
-    async def close(self) -> None:
-        self._env.close()
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -105,6 +83,39 @@ def extract_return_window(policy_summary: str) -> int:
     if match:
         return int(match.group(1))
     return 30
+
+
+def exception_applies(observation: Any) -> bool:
+    reason = str(observation.return_reason).lower()
+    policy_summary = str(observation.policy_summary).lower()
+
+    match = re.search(r"exception:\s*([^.]*)", policy_summary)
+    clause = match.group(1) if match else ""
+
+    if reason == "damaged-shipping" and (
+        "damage in transit" in clause or "damaged" in clause
+    ):
+        return True
+
+    if reason == "defective" and "defective" in clause:
+        return True
+
+    return False
+
+
+def is_restricted_class_case(observation: Any) -> bool:
+    text = str(observation.product_condition_notes).lower()
+    return "restricted class" in text
+
+
+def should_reject_time_expired(
+    observation: Any, window: int, has_exception: bool
+) -> bool:
+    if observation.days_since_purchase <= window:
+        return False
+    if has_exception and not is_restricted_class_case(observation):
+        return False
+    return True
 
 
 def _safe_json_parse(text: str) -> Optional[Dict[str, Any]]:
@@ -147,29 +158,43 @@ def _extract_last_action_error(observation: Any) -> Optional[str]:
 
 def heuristic_policy(observation: Any, step: int) -> EcomAction:
     window = extract_return_window(observation.policy_summary)
+    has_exception = exception_applies(observation)
     notes = observation.product_condition_notes.lower()
     reason = observation.return_reason
     return_rate = float(observation.return_rate)
 
-    if observation.days_since_purchase > window:
+    ambiguous = (
+        ("mixed indicators" in notes)
+        or ("conflict" in notes)
+        or (0.40 <= return_rate <= 0.65)
+        or (observation.days_since_purchase > window and has_exception)
+    )
+    if step == 1 and ambiguous:
+        return EcomAction(action_type="REQUEST_INFO")
+
+    if should_reject_time_expired(observation, window, has_exception):
         return EcomAction(action_type="REJECT", reason_code="TIME_EXPIRED")
 
     if "restricted class" in notes:
         return EcomAction(action_type="REJECT", reason_code="POLICY_VIOLATION")
+
+    if (
+        step >= 2
+        and observation.product_value == "high"
+        and return_rate >= 0.50
+        and (
+            "conflict" in notes
+            or "disputed evidence" in notes
+            or reason in ("changed-mind", "wrong-item")
+        )
+    ):
+        return EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD")
 
     if return_rate >= 0.60 and observation.product_value == "high":
         return EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD")
 
     if reason in ("defective", "wrong-item", "damaged-shipping") and return_rate < 0.55:
         return EcomAction(action_type="APPROVE")
-
-    ambiguous = (
-        ("mixed indicators" in notes)
-        or ("conflict" in notes)
-        or (0.40 <= return_rate <= 0.60)
-    )
-    if step == 1 and ambiguous:
-        return EcomAction(action_type="REQUEST_INFO")
 
     if return_rate >= 0.55:
         return EcomAction(action_type="ESCALATE")
@@ -286,32 +311,7 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
                 break
 
     except Exception:
-        # Fallback to deterministic local execution for reproducible baseline.
-        env = LocalEnvRunner(mode="medium")
-        result = await env.reset(task_name=task_name)
-
-        for step in range(1, MAX_STEPS + 1):
-            observation = result.observation
-            action = heuristic_policy(observation, step)
-            result = await env.step(action)
-
-            reward = float(result.reward or 0.0)
-            done = bool(result.done)
-            error = _extract_last_action_error(result.observation)
-
-            rewards.append(reward)
-            steps_taken = step
-            log_step(
-                step=step,
-                action=format_action(action),
-                reward=reward,
-                done=done,
-                error=error,
-            )
-
-            if done:
-                success = bool(result.observation.info.get("grader_success", False))
-                break
+        success = False
     finally:
         if env is not None:
             try:
@@ -327,6 +327,11 @@ async def main() -> None:
     client = None
     if OpenAI is not None and API_KEY:
         client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+
+    if not ENV_BASE_URL and not LOCAL_IMAGE_NAME:
+        raise RuntimeError(
+            "Set ENV_BASE_URL or LOCAL_IMAGE_NAME before running inference.py"
+        )
 
     for task_name in TASKS:
         await run_task(task_name, client)

@@ -1,6 +1,5 @@
 ---
 title: E-commerce Returns Decision Environment
-emoji: 📦
 colorFrom: blue
 colorTo: green
 sdk: docker
@@ -15,46 +14,48 @@ tags:
 
 # E-commerce Returns Decision Environment
 
-This environment simulates a real operations workflow in online retail: deciding how to handle customer return requests under policy constraints, latent fraud risk, and financial trade-offs.
+## Problem definition
 
-It is designed as a **partially observable decision problem**, not a classification toy.
+This environment models operational return-handling decisions for online retail.
+An agent receives a partially observable request context and must choose one of:
 
-## Why this environment matters
+- `APPROVE`
+- `REJECT` with required reason code
+- `ESCALATE`
+- `REQUEST_INFO`
 
-Returns handling is a major cost center in e-commerce.
+The objective is to optimize decision quality under policy constraints, fraud risk,
+and cost trade-offs.
 
-In production settings, an operations associate (or AI agent) must balance:
+This is a decision environment, not a static classification benchmark.
 
-- customer satisfaction,
-- policy compliance,
-- fraud prevention,
-- and cost efficiency.
+## OpenEnv API contract
 
-This environment captures that exact tension with structured observations, hidden variables, and deterministic graders.
+The environment implements the OpenEnv simulation interface:
 
-## Environment API (OpenEnv)
+- `reset(...) -> observation`
+- `step(action) -> observation` where observation carries `reward`, `done`, and `info`
+- `state -> State`
 
-The environment follows the OpenEnv simulation API:
+OpenEnv metadata is defined in `openenv.yaml`.
 
-- `reset(...)` -> initial observation
-- `step(action)` -> observation, reward, done, info
-- `state` -> current episode state
+Validation:
 
-The `step` info channel is exposed via `observation.info`.
+```bash
+openenv validate .
+```
 
-## Action space
+## Typed schemas
 
-`EcomAction`:
+### Action (`EcomAction`)
 
-- `action_type`: one of `APPROVE`, `REJECT`, `ESCALATE`, `REQUEST_INFO`
-- `reason_code`: required only when `action_type == REJECT`
+- `action_type`: `APPROVE | REJECT | ESCALATE | REQUEST_INFO`
+- `reason_code` (required only for `REJECT`):
   - `TIME_EXPIRED`
   - `POLICY_VIOLATION`
   - `SUSPECTED_FRAUD`
 
-## Observation space
-
-`EcomObservation` fields:
+### Observation (`EcomObservation`)
 
 - `return_reason`
 - `product_category`
@@ -62,172 +63,160 @@ The `step` info channel is exposed via `observation.info`.
 - `days_since_purchase`
 - `user_account_age_days`
 - `product_condition_notes`
-- `return_rate` (0.0 to 1.0)
+- `return_rate` (bounded `[0,1]`)
 - `total_orders`
-- `policy_summary` (plain text, includes rules and exceptions)
-- `info` (step metadata)
+- `policy_summary` (text policy including exception clauses)
+- `info` (step metadata and grader payload)
 
-No identifier-only fields are included in the observation.
+### Reward breakdown (`EcomReward`)
 
-## Hidden state (grader-only)
+Terminal grader payload is typed and bounded:
 
-The environment keeps the following latent variables hidden from the agent:
-
-- `fraud_risk_score`
-- `true_intent` (`genuine` or `abusive`)
-- `cost_impact` by candidate action
+- `policy_gate`
+- `financial_score`
+- `fraud_score`
+- `efficiency_score`
+- `normalized_reward`
+- `policy_violation`
 - `optimal_action`
+- `matched_optimal`
 
-These are used to compute scores/rewards and evaluate decision quality.
+Each numeric component is constrained to `[0,1]`.
 
-## Episode flow and boundaries
+## State and episode flow
 
-- One request per episode.
-- `APPROVE`, `REJECT`, `ESCALATE` are terminal actions (`done=True`).
-- `REQUEST_INFO` is non-terminal on first use and deterministically refines existing observation fields:
-  - `product_condition_notes`
-  - `return_reason` (optional refinement)
-  - slight refinement of `return_rate`
-- No new fields are introduced after `REQUEST_INFO`.
+### Episode semantics
+
+- One return request per episode.
+- Terminal actions: `APPROVE`, `REJECT`, `ESCALATE`.
+- `REQUEST_INFO` is non-terminal on first use and refines existing fields only.
+- Repeating `REQUEST_INFO` yields a penalty.
+- Invalid final-action sequencing yields a penalty.
+- Hard cap `_MAX_STEPS = 4`; exceeding cap terminates episode with zero score.
+
+### `REQUEST_INFO` behavior
+
+After `REQUEST_INFO`, the observation deterministically refines:
+
+- `product_condition_notes`
+- `return_reason` (may refine)
+- `return_rate` (slight adjustment)
+
+No new observation fields are introduced.
 
 ## Scenario generation
 
-Scenarios are generated programmatically from controlled distributions.
+Scenarios are generated from controlled distributions.
 
-The generator includes mandatory realism correlations:
+### Global realism constraints
 
-- higher `return_rate` -> higher fraud likelihood,
-- lower `return_rate` -> lower fraud likelihood,
-- higher `product_value` -> higher fraud likelihood,
-- lower `product_value` -> lower fraud likelihood.
+- higher `return_rate` increases latent fraud risk
+- lower `return_rate` decreases latent fraud risk
+- higher `product_value` increases latent fraud risk
+- lower `product_value` decreases latent fraud risk
 
-Difficulty is not just fraud probability; it also changes ambiguity and signal conflict.
+### Policy modeling
 
-## Reward design
+Category policies include:
 
-Reward is deterministic and normalized to `[0.0, 1.0]`.
+- return window (days)
+- non-returnable categories
+- category-specific exceptions expressed in `policy_summary`
 
-1. **Policy gate** (hard constraint)
-   - policy violation => reward `0.0`
-2. Component scores are bounded independently:
+Exception application is aligned with category policy text.
+
+## Task set and deterministic graders
+
+The environment defines three deterministic benchmark tasks:
+
+1. `easy_policy_compliance`
+2. `medium_balanced_judgment`
+3. `hard_conflicting_signals`
+
+Each task has:
+
+- fixed seed
+- explicit objective string
+- fixed success threshold
+
+Hard mode uses conflict-heavy, high-value templates and enforces evidence-driven
+handling in ambiguous cases.
+
+## Reward function
+
+Terminal reward is computed as:
+
+1. **Policy gate**: violation => reward `0.0`
+2. Component scoring (each independently bounded):
    - `financial_score in [0,1]`
    - `fraud_score in [0,1]`
    - `efficiency_score in [0,1]`
-3. Weighted final score:
-   - `0.5 * financial + 0.3 * fraud + 0.2 * efficiency`
+3. Weighted aggregate:
 
-This avoids overflow and grader instability.
-
-## Tasks and graders (easy -> medium -> hard)
-
-The environment ships with 3 deterministic benchmark tasks, each with fixed seed + threshold:
-
-1. `easy_policy_compliance`
-   - clear low-risk case
-   - success threshold: `0.75`
-2. `medium_balanced_judgment`
-   - ambiguous policy/risk trade-off
-   - success threshold: `0.68`
-3. `hard_conflicting_signals`
-   - high-value conflicting signals + exception pressure
-   - success threshold: `0.62`
-
-Terminal observation includes grader outputs in `info`:
-
-- `grader_score` (0.0 to 1.0)
-- `grader_success` (bool)
-- detailed component `breakdown`
-
-## Quick start
-
-### Local dev server
-
-```bash
-uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
+```text
+reward = 0.5 * financial_score + 0.3 * fraud_score + 0.2 * efficiency_score
 ```
 
-### Python usage
+Additional shaping:
 
-```python
-import asyncio
-from ecom import EcomAction, EcomEnv
+- positive/negative non-terminal reward on `REQUEST_INFO` depending on ambiguity
+- penalties for invalid step patterns
 
+## Inference script and reproducibility
 
-async def run():
-    env = await EcomEnv.from_docker_image("ecom-env:latest")
-    try:
-        result = await env.reset(task_name="medium_balanced_judgment")
-        # optional extra context
-        result = await env.step(EcomAction(action_type="REQUEST_INFO"))
-        # final decision
-        result = await env.step(EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD"))
-        print(result.reward, result.done, result.observation.info)
-    finally:
-        await env.close()
+Root `inference.py` is the submission baseline runner.
 
-
-asyncio.run(run())
-```
-
-## Baseline inference
-
-`inference.py` is at repo root as required.
-
-Required env vars:
+### Required environment variables
 
 - `MODEL_NAME`
-- `LOCAL_IMAGE_NAME`
 - `HF_TOKEN` (or `OPENAI_API_KEY`)
+- `LOCAL_IMAGE_NAME` when using `from_docker_image()`
 
 Optional:
 
-- `API_BASE_URL` (defaults to `https://api.openai.com/v1`)
+- `API_BASE_URL` (default: `https://api.openai.com/v1`)
+- `ENV_BASE_URL` (remote environment endpoint)
 
-Run:
+### LLM client requirement
 
-```bash
-python inference.py
+All LLM calls use:
+
+```python
+from openai import OpenAI
 ```
 
-The script emits strict structured logs:
+with `api_key` and `base_url` derived from environment variables.
 
-- `[START] ...`
-- `[STEP] ...`
-- `[END] ...`
+### STDOUT log contract
 
-### Reproducible baseline scores
+The script emits strict one-line records:
 
-Current deterministic baseline (heuristic fallback) on default task seeds:
+- `[START] task=<task> env=<benchmark> model=<model>`
+- `[STEP] step=<n> action=<action> reward=<r> done=<bool> error=<value|null>`
+- `[END] success=<bool> steps=<n> rewards=<r1,r2,...>`
+
+Rewards are formatted to two decimals.
+
+### Current deterministic baseline (default seeds)
 
 - `easy_policy_compliance`: `0.7997`
-- `medium_balanced_judgment`: `0.8388`
-- `hard_conflicting_signals`: `0.8253`
+- `medium_balanced_judgment`: `0.8863` (`0.08 + 0.81` trajectory)
+- `hard_conflicting_signals`: `0.9750` (`0.08 + 0.90` trajectory)
 
-## Hugging Face Spaces deployment
+## Setup and execution
+
+### Local server
+
+```bash
+uvicorn server.app:app --host 0.0.0.0 --port 8000
+```
+
+### Docker build and run
 
 From `ecom/`:
 
 ```bash
-openenv push
-```
-
-Or explicit options:
-
-```bash
-openenv push --repo-id <namespace>/<space-name> --private
-```
-
-## Docker
-
-Build from the environment root (`ecom/`):
-
-```bash
 docker build -t ecom-env:latest -f server/Dockerfile .
-```
-
-Run:
-
-```bash
 docker run --rm -p 8000:8000 ecom-env:latest
 ```
 
@@ -237,7 +226,7 @@ Health check:
 curl http://localhost:8000/health
 ```
 
-## Validation
+### OpenEnv validation
 
 From `ecom/`:
 
@@ -245,8 +234,16 @@ From `ecom/`:
 openenv validate .
 ```
 
-Optional pre-check from repository root:
+From repository root (pre-check helper):
 
 ```bash
-./validate-submission.sh <your-space-url> .
+./validate-submission.sh <space-url> .
+```
+
+### Hugging Face deployment
+
+From `ecom/`:
+
+```bash
+openenv push
 ```

@@ -81,6 +81,7 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
     """Single-request return decision environment with partial observability."""
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    _MAX_STEPS: int = 4
 
     _VALUE_INDEX: Dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 
@@ -158,9 +159,9 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             difficulty="hard",
             seed=333,
             objective=(
-                "Resolve conflicting policy exceptions and risk signals in a high-value case."
+                "Resolve conflicting high-value risk signals with policy-compliant evidence handling."
             ),
-            success_threshold=0.62,
+            success_threshold=0.74,
         ),
     }
 
@@ -280,6 +281,32 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 "Episode already terminated. Call reset() to start a new episode"
             )
 
+        if self._state.step_count >= self._MAX_STEPS:
+            self._done = True
+            timeout_info = {
+                "mode": self._mode,
+                "task_name": self._task_name,
+                "phase": "terminal",
+                "breakdown": EcomReward(
+                    policy_gate=0.0,
+                    financial_score=0.0,
+                    fraud_score=0.0,
+                    efficiency_score=0.0,
+                    normalized_reward=0.0,
+                    policy_violation=True,
+                ).model_dump(),
+                "grader_score": 0.0,
+                "grader_success": False,
+                "termination_reason": "max_steps_exceeded",
+                "step_contract": "observation_reward_done_info",
+            }
+            return self._to_observation(
+                self._visible_case,
+                reward=0.0,
+                done=True,
+                info=timeout_info,
+            )
+
         self._state.step_count += 1
 
         if action.action_type == "REQUEST_INFO":
@@ -394,7 +421,7 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             ),
             version="1.0.0",
             author="OpenEnv_H",
-            documentation_url="https://huggingface.co/spaces/<repo-id>",
+            documentation_url="https://huggingface.co/spaces/Lonelyguyse1/ecom",
         )
 
     @staticmethod
@@ -404,6 +431,9 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
         return random.Random(seed)
 
     def _generate_case(self, rng) -> tuple[VisibleCase, HiddenCaseState]:
+        if self._task_name == "hard_conflicting_signals":
+            return self._generate_hard_case(rng)
+
         category = rng.choice(tuple(self._CATEGORY_POLICIES.keys()))
         policy = self._CATEGORY_POLICIES[category]
 
@@ -455,7 +485,7 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
         )
 
         # Policy constraints with exception support.
-        exception_applies = return_reason in ("defective", "damaged-shipping")
+        exception_applies = self._exception_applies(category, return_reason)
 
         category_policy_violated = False
         if not exception_applies:
@@ -532,6 +562,100 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
         )
         return visible, hidden
 
+    def _generate_hard_case(self, rng) -> tuple[VisibleCase, HiddenCaseState]:
+        category = "electronics"
+        policy = self._CATEGORY_POLICIES[category]
+
+        return_reason = rng.choice(("wrong-item", "changed-mind"))
+        value_bucket = "high"
+        days_since_purchase = rng.randint(
+            max(1, policy.window_days - 4), policy.window_days
+        )
+        user_account_age_days = rng.randint(25, 120)
+        total_orders = rng.randint(4, 28)
+        return_rate = self._clamp01(0.50 + rng.random() * 0.06)
+
+        base_risk = self._cfg.fraud_probability
+        risk = base_risk
+        risk += 0.35 * (return_rate - 0.30)
+        risk += 0.10 * (self._VALUE_INDEX[value_bucket] - 1)
+        risk += 0.12 if return_reason in ("changed-mind", "wrong-item") else 0.0
+        risk += 0.10 if user_account_age_days < 90 else 0.0
+        fraud_risk_score = self._clamp01(risk)
+        true_intent: Intent = (
+            "abusive" if rng.random() < max(0.75, fraud_risk_score) else "genuine"
+        )
+
+        exception_applies = self._exception_applies(category, return_reason)
+        category_policy_violated = (not exception_applies) and (rng.random() < 0.12)
+        time_policy_violated = (
+            days_since_purchase > policy.window_days and not exception_applies
+        )
+
+        condition_brief, condition_detailed = self._CONDITION_NOTES[return_reason]
+        condition_brief += "; escalation history indicates conflicting evidence"
+        condition_detailed += (
+            "; forensic audit surfaced contradictory claimant and logistics signals"
+        )
+        condition_brief += (
+            "; prior return investigations on this account show disputed evidence"
+        )
+        condition_detailed += "; cross-team review indicates conflicting intent indicators and high potential abuse exposure"
+
+        if category_policy_violated:
+            condition_brief += (
+                "; order line is tagged under restricted class 'final-sale'"
+            )
+            condition_detailed += (
+                "; policy audit confirms 'final-sale' restricted class"
+            )
+
+        policy_summary = (
+            "Returns accepted within 30 days. "
+            "Non-returnable categories: final-sale, personal-care. "
+            "Exception: Defective electronics remain returnable even beyond standard restrictions. "
+            "For conflicting claims, request additional evidence before any final decision."
+        )
+
+        visible = VisibleCase(
+            return_reason=return_reason,
+            product_category=category,
+            product_value=value_bucket,
+            days_since_purchase=days_since_purchase,
+            user_account_age_days=user_account_age_days,
+            product_condition_notes=condition_brief,
+            return_rate=return_rate,
+            total_orders=total_orders,
+            policy_summary=policy_summary,
+        )
+
+        financial_scores = self._financial_scores(
+            value_bucket=value_bucket,
+            intent=true_intent,
+            category_violation=category_policy_violated,
+            time_violation=time_policy_violated,
+            return_reason=return_reason,
+        )
+
+        if time_policy_violated or category_policy_violated:
+            optimal_action: FinalAction = "REJECT"
+        elif true_intent == "abusive" and fraud_risk_score >= 0.50:
+            optimal_action = "REJECT"
+        else:
+            optimal_action = self._argmax_action(financial_scores)
+
+        hidden = HiddenCaseState(
+            fraud_risk_score=fraud_risk_score,
+            true_intent=true_intent,
+            optimal_action=optimal_action,
+            cost_impact=financial_scores,
+            category_policy_violated=category_policy_violated,
+            time_policy_violated=time_policy_violated,
+            exception_applies=exception_applies,
+            is_ambiguous=True,
+        )
+        return visible, hidden
+
     @staticmethod
     def _sample_return_rate(rng, total_orders: int) -> float:
         band = rng.random()
@@ -559,6 +683,19 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
         return (
             text + " In borderline cases, consistency checks and risk controls apply."
         )
+
+    @staticmethod
+    def _exception_reason_tokens(category: str) -> tuple[str, ...]:
+        if category == "electronics":
+            return ("defective",)
+        if category == "fashion":
+            return ("defective",)
+        if category == "home":
+            return ("damaged-shipping",)
+        return ()
+
+    def _exception_applies(self, category: str, return_reason: str) -> bool:
+        return return_reason in self._exception_reason_tokens(category)
 
     @staticmethod
     def _financial_scores(
@@ -645,6 +782,8 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
         trajectory_bonus = 0.0
         if self._requested_info and hidden.is_ambiguous:
             trajectory_bonus += 0.05
+        elif hidden.is_ambiguous and not self._requested_info:
+            trajectory_bonus -= 0.10
 
         # Component scores are individually bounded [0, 1] before weighting.
         financial_raw = (
@@ -672,14 +811,29 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
         )
         return final_reward, reward_model.model_dump()
 
-    @staticmethod
     def _policy_gate(
+        self,
         action: EcomAction,
         visible: VisibleCase,
         hidden: HiddenCaseState,
     ) -> bool:
+        if (
+            self._task_name == "hard_conflicting_signals"
+            and hidden.is_ambiguous
+            and not self._requested_info
+            and action.action_type in ("APPROVE", "REJECT", "ESCALATE")
+        ):
+            return False
+
         if action.action_type == "APPROVE":
             if hidden.time_policy_violated or hidden.category_policy_violated:
+                return False
+
+            if (
+                hidden.is_ambiguous
+                and hidden.fraud_risk_score >= 0.55
+                and not hidden.exception_applies
+            ):
                 return False
 
         if action.action_type == "REJECT":
@@ -710,6 +864,13 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             and not hidden.category_policy_violated
             and hidden.fraud_risk_score < 0.30
             and visible.return_reason in ("defective", "wrong-item", "damaged-shipping")
+        ):
+            return False
+
+        if (
+            action.action_type == "ESCALATE"
+            and hidden.is_ambiguous
+            and not self._requested_info
         ):
             return False
 
