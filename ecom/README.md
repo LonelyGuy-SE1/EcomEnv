@@ -93,6 +93,18 @@ Each numeric component is constrained to `[0,1]`.
 - Repeating `REQUEST_INFO` yields a penalty.
 - Invalid final-action sequencing yields a penalty.
 - Hard cap `_MAX_STEPS = 4`; exceeding cap terminates episode with zero score.
+- Initial observation includes `info.available_actions` so agents can decide from
+  explicit valid choices.
+- If `step()` is called before `reset()`, the environment returns an initial
+  observation with `invalid_action=step_called_before_reset_action_ignored`
+  and does not execute the provided action.
+- If `step()` is called after terminal state, the environment returns a terminal
+  observation with `invalid_action=episode_already_terminated_call_reset`.
+
+Initial and intermediate `info` payloads include:
+
+- `available_actions`: action set valid for the current phase
+- `reject_reason_codes`: valid reject reason codes when `REJECT` is available
 
 ### `REQUEST_INFO` behavior
 

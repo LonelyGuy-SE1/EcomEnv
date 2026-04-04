@@ -262,6 +262,17 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 else None,
                 "task_seed": effective_seed,
                 "phase": "initial",
+                "available_actions": [
+                    "APPROVE",
+                    "REJECT",
+                    "ESCALATE",
+                    "REQUEST_INFO",
+                ],
+                "reject_reason_codes": [
+                    "TIME_EXPIRED",
+                    "POLICY_VIOLATION",
+                    "SUSPECTED_FRAUD",
+                ],
                 "step_contract": "observation_reward_done_info",
             },
         )
@@ -274,11 +285,25 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
     ) -> EcomObservation:
         del timeout_s, kwargs
         if self._visible_case is None or self._hidden_case is None:
-            # Allow stateless HTTP /step calls by lazily initializing an episode.
-            self.reset()
+            # If step is called before reset, first return an initial observation
+            # and ignore the provided action for fair action selection.
+            initial_observation = self.reset()
+            initial_observation.info = {
+                **initial_observation.info,
+                "invalid_action": "step_called_before_reset_action_ignored",
+            }
+            return initial_observation
+
         if self._done:
-            raise RuntimeError(
-                "Episode already terminated. Call reset() to start a new episode"
+            return self._to_observation(
+                self._visible_case,
+                reward=0.0,
+                done=True,
+                info={
+                    "invalid_action": "episode_already_terminated_call_reset",
+                    "available_actions": [],
+                    "step_contract": "observation_reward_done_info",
+                },
             )
 
         if self._state.step_count >= self._MAX_STEPS:
@@ -298,6 +323,7 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 "grader_score": 0.0,
                 "grader_success": False,
                 "termination_reason": "max_steps_exceeded",
+                "available_actions": [],
                 "step_contract": "observation_reward_done_info",
             }
             return self._to_observation(
@@ -314,6 +340,11 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 info = {
                     "invalid_action": "REQUEST_INFO already used",
                     "allowed_actions": ["APPROVE", "REJECT", "ESCALATE"],
+                    "reject_reason_codes": [
+                        "TIME_EXPIRED",
+                        "POLICY_VIOLATION",
+                        "SUSPECTED_FRAUD",
+                    ],
                     "step_penalty": -0.10,
                     "step_contract": "observation_reward_done_info",
                 }
@@ -333,6 +364,12 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             info = {
                 "phase": "post_request_info",
                 "revealed": ["product_condition_notes", "return_reason"],
+                "available_actions": ["APPROVE", "REJECT", "ESCALATE"],
+                "reject_reason_codes": [
+                    "TIME_EXPIRED",
+                    "POLICY_VIOLATION",
+                    "SUSPECTED_FRAUD",
+                ],
                 "step_reward": info_gain_reward,
                 "step_contract": "observation_reward_done_info",
             }
@@ -347,6 +384,12 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             info = {
                 "invalid_action": "Final action must be APPROVE, REJECT, or ESCALATE",
                 "step_penalty": -0.05,
+                "allowed_actions": ["APPROVE", "REJECT", "ESCALATE"],
+                "reject_reason_codes": [
+                    "TIME_EXPIRED",
+                    "POLICY_VIOLATION",
+                    "SUSPECTED_FRAUD",
+                ],
                 "step_contract": "observation_reward_done_info",
             }
             return self._to_observation(

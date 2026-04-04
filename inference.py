@@ -156,7 +156,21 @@ def _extract_last_action_error(observation: Any) -> Optional[str]:
     return str(value)
 
 
+def _extract_available_actions(observation: Any) -> List[str]:
+    if not hasattr(observation, "info"):
+        return []
+    info = observation.info
+    if not isinstance(info, dict):
+        return []
+    raw = info.get("available_actions")
+    if not isinstance(raw, list):
+        return []
+    return [str(x) for x in raw]
+
+
 def heuristic_policy(observation: Any, step: int) -> EcomAction:
+    available_actions = set(_extract_available_actions(observation))
+
     window = extract_return_window(observation.policy_summary)
     has_exception = exception_applies(observation)
     notes = observation.product_condition_notes.lower()
@@ -170,12 +184,19 @@ def heuristic_policy(observation: Any, step: int) -> EcomAction:
         or (observation.days_since_purchase > window and has_exception)
     )
     if step == 1 and ambiguous:
-        return EcomAction(action_type="REQUEST_INFO")
+        if available_actions and "REQUEST_INFO" not in available_actions:
+            pass
+        else:
+            return EcomAction(action_type="REQUEST_INFO")
 
     if should_reject_time_expired(observation, window, has_exception):
+        if available_actions and "REJECT" not in available_actions:
+            return EcomAction(action_type="APPROVE")
         return EcomAction(action_type="REJECT", reason_code="TIME_EXPIRED")
 
     if "restricted class" in notes:
+        if available_actions and "REJECT" not in available_actions:
+            return EcomAction(action_type="APPROVE")
         return EcomAction(action_type="REJECT", reason_code="POLICY_VIOLATION")
 
     if (
@@ -188,16 +209,31 @@ def heuristic_policy(observation: Any, step: int) -> EcomAction:
             or reason in ("changed-mind", "wrong-item")
         )
     ):
+        if available_actions and "REJECT" not in available_actions:
+            return EcomAction(action_type="APPROVE")
         return EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD")
 
     if return_rate >= 0.60 and observation.product_value == "high":
+        if available_actions and "REJECT" not in available_actions:
+            return EcomAction(action_type="APPROVE")
         return EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD")
 
     if reason in ("defective", "wrong-item", "damaged-shipping") and return_rate < 0.55:
+        if available_actions and "APPROVE" not in available_actions:
+            return EcomAction(action_type="ESCALATE")
         return EcomAction(action_type="APPROVE")
 
     if return_rate >= 0.55:
+        if available_actions and "ESCALATE" not in available_actions:
+            return EcomAction(action_type="APPROVE")
         return EcomAction(action_type="ESCALATE")
+
+    if available_actions and "APPROVE" not in available_actions:
+        if "ESCALATE" in available_actions:
+            return EcomAction(action_type="ESCALATE")
+        if "REJECT" in available_actions:
+            return EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD")
+
     return EcomAction(action_type="APPROVE")
 
 
