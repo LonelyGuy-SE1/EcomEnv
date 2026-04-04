@@ -200,8 +200,8 @@ Rewards are formatted to two decimals.
 ### Current deterministic baseline (default seeds)
 
 - `easy_policy_compliance`: `0.7997`
-- `medium_balanced_judgment`: `0.8863` (`0.08 + 0.81` trajectory)
-- `hard_conflicting_signals`: `0.9750` (`0.08 + 0.90` trajectory)
+- `medium_balanced_judgment`: `0.8871` (`0.08 + 0.8071` trajectory)
+- `hard_conflicting_signals`: `0.9750` (`0.08 + 0.8950` trajectory)
 
 ## Setup and execution
 
