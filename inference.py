@@ -150,10 +150,11 @@ def _extract_last_action_error(observation: Any) -> Optional[str]:
     info = observation.info
     if not isinstance(info, dict):
         return None
-    value = info.get("last_action_error")
-    if value is None:
-        return None
-    return str(value)
+    for key in ("last_action_error", "invalid_action"):
+        value = info.get(key)
+        if value is not None:
+            return str(value)
+    return None
 
 
 def _extract_available_actions(observation: Any) -> List[str]:
@@ -166,6 +167,33 @@ def _extract_available_actions(observation: Any) -> List[str]:
     if not isinstance(raw, list):
         return []
     return [str(x) for x in raw]
+
+
+def _extract_reject_reason_codes(observation: Any) -> List[str]:
+    if not hasattr(observation, "info"):
+        return []
+    info = observation.info
+    if not isinstance(info, dict):
+        return []
+    raw = info.get("reject_reason_codes")
+    if not isinstance(raw, list):
+        return []
+    return [str(x) for x in raw]
+
+
+def _enforce_action_contract(
+    observation: Any, action: EcomAction
+) -> Optional[EcomAction]:
+    available_actions = _extract_available_actions(observation)
+    if available_actions and action.action_type not in set(available_actions):
+        return None
+
+    if action.action_type == "REJECT":
+        valid_reasons = set(_extract_reject_reason_codes(observation))
+        if valid_reasons and action.reason_code not in valid_reasons:
+            return None
+
+    return action
 
 
 def heuristic_policy(observation: Any, step: int) -> EcomAction:
@@ -243,6 +271,9 @@ def model_policy(
     if client is None:
         return None
 
+    available_actions = _extract_available_actions(observation)
+    reject_reason_codes = _extract_reject_reason_codes(observation)
+
     prompt = (
         "You are a returns operations agent. Choose one action JSON only.\n"
         "Allowed action_type: APPROVE, REJECT, ESCALATE, REQUEST_INFO\n"
@@ -260,6 +291,11 @@ def model_policy(
         f"total_orders: {observation.total_orders}\n"
         f"policy_summary: {observation.policy_summary}\n"
     )
+
+    if available_actions:
+        prompt += f"available_actions: {', '.join(available_actions)}\n"
+    if reject_reason_codes:
+        prompt += f"available_reject_reason_codes: {', '.join(reject_reason_codes)}\n"
 
     try:
         response = client.chat.completions.create(
@@ -288,10 +324,12 @@ def model_policy(
                 "SUSPECTED_FRAUD",
             }:
                 return None
-            return EcomAction(action_type="REJECT", reason_code=reason_code)
+            action = EcomAction(action_type="REJECT", reason_code=reason_code)
+            return _enforce_action_contract(observation, action)
 
         if action_type in {"APPROVE", "ESCALATE", "REQUEST_INFO"}:
-            return EcomAction(action_type=action_type)
+            action = EcomAction(action_type=action_type)
+            return _enforce_action_contract(observation, action)
     except Exception:
         return None
 

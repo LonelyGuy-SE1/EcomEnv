@@ -288,19 +288,23 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             # If step is called before reset, first return an initial observation
             # and ignore the provided action for fair action selection.
             initial_observation = self.reset()
+            error_code = "step_called_before_reset_action_ignored"
             initial_observation.info = {
                 **initial_observation.info,
-                "invalid_action": "step_called_before_reset_action_ignored",
+                "invalid_action": error_code,
+                "last_action_error": error_code,
             }
             return initial_observation
 
         if self._done:
+            error_code = "episode_already_terminated_call_reset"
             return self._to_observation(
                 self._visible_case,
                 reward=0.0,
                 done=True,
                 info={
-                    "invalid_action": "episode_already_terminated_call_reset",
+                    "invalid_action": error_code,
+                    "last_action_error": error_code,
                     "available_actions": [],
                     "step_contract": "observation_reward_done_info",
                 },
@@ -337,8 +341,11 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
 
         if action.action_type == "REQUEST_INFO":
             if self._requested_info:
+                error_code = "request_info_already_used"
                 info = {
-                    "invalid_action": "REQUEST_INFO already used",
+                    "invalid_action": error_code,
+                    "last_action_error": error_code,
+                    "available_actions": ["APPROVE", "REJECT", "ESCALATE"],
                     "allowed_actions": ["APPROVE", "REJECT", "ESCALATE"],
                     "reject_reason_codes": [
                         "TIME_EXPIRED",
@@ -381,9 +388,12 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             )
 
         if action.action_type not in ("APPROVE", "REJECT", "ESCALATE"):
+            error_code = "invalid_final_action"
             info = {
-                "invalid_action": "Final action must be APPROVE, REJECT, or ESCALATE",
+                "invalid_action": error_code,
+                "last_action_error": error_code,
                 "step_penalty": -0.05,
+                "available_actions": ["APPROVE", "REJECT", "ESCALATE"],
                 "allowed_actions": ["APPROVE", "REJECT", "ESCALATE"],
                 "reject_reason_codes": [
                     "TIME_EXPIRED",

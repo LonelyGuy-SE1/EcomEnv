@@ -14,63 +14,62 @@ tags:
 
 # E-commerce Returns Decision Environment
 
-## Problem definition
+This environment is a partially observable, policy-constrained decision process
+for a single e-commerce return case per episode.
 
-This environment models operational return-handling decisions for online retail.
-An agent receives a partially observable request context and must choose one of:
+## Environment root and loader contract
 
-- `APPROVE`
-- `REJECT` with required reason code
-- `ESCALATE`
-- `REQUEST_INFO`
+This repository uses `ecom/` as the OpenEnv environment root.
 
-The objective is to optimize decision quality under policy constraints, fraud risk,
-and cost trade-offs.
+- `ecom/openenv.yaml` is the authoritative manifest.
+- `app: server.app:app` resolves inside `ecom/`, so it maps to
+  `ecom/server/app.py`.
+- Validate from repository root with `openenv validate ecom`, or from
+  `ecom/` with `openenv validate .`.
 
-This is a decision environment, not a static classification benchmark.
+## Formal task definition
 
-## OpenEnv API contract
+Episode is defined over hidden state `s_t` and observation `o_t`.
 
-The environment implements the OpenEnv simulation interface:
+- Hidden state contains fraud intent, policy violations, latent risk, and
+  optimal action target.
+- Observation exposes only operational case fields and policy summary text.
+- Agent takes one action from `A = {APPROVE, REJECT, ESCALATE, REQUEST_INFO}`.
+- Terminal objective is maximizing normalized reward while satisfying policy gate
+  constraints.
 
-- `reset(...) -> observation`
-- `step(action) -> observation` where observation carries `reward`, `done`, and `info`
-- `state -> State`
+The environment is not a static classifier. It is a short-horizon sequential
+decision loop with action-dependent transition and scoring.
 
-OpenEnv metadata is defined in `openenv.yaml`.
-
-Validation:
-
-```bash
-openenv validate .
-```
-
-## Typed schemas
+## Schemas
 
 ### Action (`EcomAction`)
 
 - `action_type`: `APPROVE | REJECT | ESCALATE | REQUEST_INFO`
-- `reason_code` (required only for `REJECT`):
+- `reason_code` is required only when `action_type == REJECT`
+- Allowed reject reasons:
   - `TIME_EXPIRED`
   - `POLICY_VIOLATION`
   - `SUSPECTED_FRAUD`
+
+Validation is strict: non-REJECT actions cannot carry `reason_code`.
 
 ### Observation (`EcomObservation`)
 
 - `return_reason`
 - `product_category`
-- `product_value` (`low | medium | high`)
+- `product_value` in `{low, medium, high}`
 - `days_since_purchase`
 - `user_account_age_days`
 - `product_condition_notes`
-- `return_rate` (bounded `[0,1]`)
-- `total_orders`
-- `policy_summary` (text policy including exception clauses)
-- `info` (step metadata and grader payload)
+- `return_rate` in `[0,1]`
+- `total_orders >= 1`
+- `policy_summary`
+- `reward`, `done`, `info`
 
-### Reward breakdown (`EcomReward`)
+### Reward payload (`EcomReward`)
 
-Terminal grader payload is typed and bounded:
+Terminal breakdown keys:
 
 - `policy_gate`
 - `financial_score`
@@ -81,181 +80,246 @@ Terminal grader payload is typed and bounded:
 - `optimal_action`
 - `matched_optimal`
 
-Each numeric component is constrained to `[0,1]`.
+All numeric reward components are bounded to `[0,1]`.
 
-## State and episode flow
+## Episode protocol
 
-### Episode semantics
+### Reset
 
-- One return request per episode.
-- Terminal actions: `APPROVE`, `REJECT`, `ESCALATE`.
-- `REQUEST_INFO` is non-terminal on first use and refines existing fields only.
-- Repeating `REQUEST_INFO` yields a penalty.
-- Invalid final-action sequencing yields a penalty.
-- Hard cap `_MAX_STEPS = 4`; exceeding cap terminates episode with zero score.
-- Initial observation includes `info.available_actions` so agents can decide from
-  explicit valid choices.
-- If `step()` is called before `reset()`, the environment returns an initial
-  observation with `invalid_action=step_called_before_reset_action_ignored`
-  and does not execute the provided action.
-- If `step()` is called after terminal state, the environment returns a terminal
-  observation with `invalid_action=episode_already_terminated_call_reset`.
+`reset(seed=None, episode_id=None, task_name=None)`:
 
-Initial and intermediate `info` payloads include:
+- initializes state
+- samples deterministic or stochastic case
+- returns initial observation with:
+  - `info.phase=initial`
+  - `info.available_actions=[APPROVE, REJECT, ESCALATE, REQUEST_INFO]`
+  - `info.reject_reason_codes=[TIME_EXPIRED, POLICY_VIOLATION, SUSPECTED_FRAUD]`
+  - `info.task_name`, `info.task_seed`, `info.task_objective` when task-based
 
-- `available_actions`: action set valid for the current phase
-- `reject_reason_codes`: valid reject reason codes when `REJECT` is available
+### Step
 
-### `REQUEST_INFO` behavior
+`step(action)` follows these guards and transitions:
 
-After `REQUEST_INFO`, the observation deterministically refines:
+1. If called before reset:
+   - action is ignored
+   - returns fresh initial observation
+   - sets `invalid_action` and `last_action_error` to
+     `step_called_before_reset_action_ignored`
+2. If called after terminal:
+   - returns terminal observation
+   - `reward=0.0`, `done=true`
+   - sets `invalid_action` and `last_action_error` to
+     `episode_already_terminated_call_reset`
+3. `REQUEST_INFO` first use:
+   - non-terminal
+   - refines existing fields only
+   - reward shaping: `+0.08` if ambiguous else `-0.03`
+4. Repeated `REQUEST_INFO`:
+   - non-terminal penalty `-0.10`
+   - error code: `request_info_already_used`
+5. Invalid non-terminal-final action type:
+   - non-terminal penalty `-0.05`
+   - error code: `invalid_final_action`
+6. Valid terminal action (`APPROVE|REJECT|ESCALATE`):
+   - runs policy gate then reward model
+   - returns terminal observation with grader fields
+
+Hard cap is `_MAX_STEPS=4`. Exceeding cap returns terminal `0.0` with
+`termination_reason=max_steps_exceeded`.
+
+## Info-channel contract
+
+`info` is the machine-readable control channel. It is used for policy hints,
+error handling, and grader reporting.
+
+Common keys by phase:
+
+- Initial phase:
+  - `phase=initial`
+  - `available_actions`
+  - `reject_reason_codes`
+- Post-`REQUEST_INFO` phase:
+  - `phase=post_request_info`
+  - `revealed`
+  - `available_actions`
+  - `reject_reason_codes`
+- Terminal phase:
+  - `phase=terminal`
+  - `breakdown`
+  - `grader_score`
+  - `grader_success`
+- Invalid action paths:
+  - `invalid_action` (stable machine code)
+  - `last_action_error` (same machine code)
+
+## Case generation model
+
+### Difficulty presets
+
+- `easy`: fraud `0.10`, ambiguity `0.10`, conflict `0.05`
+- `medium`: fraud `0.25`, ambiguity `0.30`, conflict `0.20`
+- `hard`: fraud `0.40`, ambiguity `0.55`, conflict `0.45`
+
+### Latent risk construction
+
+For non-hard-template episodes, latent fraud risk is derived from correlated
+signals, not independent labels.
+
+Base formula (clamped to `[0,1]`):
+
+```text
+risk = base_fraud_probability
+     + 0.35 * (return_rate - 0.30)
+     + 0.10 * value_index
+     + reason_and_account_adjustments
+```
+
+Where `value_index` maps low/medium/high to `-1/0/+1` offset through internal
+indexing. Intent is then sampled from this latent risk.
+
+### Policy model
+
+Each category defines:
+
+- return window days
+- non-returnable category list
+- exception text
+
+Policy violations are split into:
+
+- `time_policy_violated`
+- `category_policy_violated`
+
+Exception handling is explicitly modeled and influences both generation and
+policy gate decisions.
+
+### Ambiguity and conflict injection
+
+- Ambiguity and conflict are sampled from difficulty-controlled rates.
+- Conflict mutates condition/policy wording to create realistic contradictory
+  evidence patterns.
+
+### Hard template (`hard_conflicting_signals`)
+
+The hard task uses a deterministic high-risk template:
+
+- high-value electronics focus
+- near-window timing
+- intentionally conflicting evidence phrases
+- stricter policy-gate behavior requiring evidence handling before finalization
+
+## Transition semantics for `REQUEST_INFO`
+
+`REQUEST_INFO` does not add new fields. It only refines existing observable
+fields deterministically from hidden intent:
 
 - `product_condition_notes`
 - `return_reason` (may refine)
-- `return_rate` (slight adjustment)
+- `return_rate` (small deterministic shift)
 
-No new observation fields are introduced.
+This keeps schema fixed while allowing information-gathering behavior.
 
-## Scenario generation
+## Policy gate
 
-Scenarios are generated from controlled distributions.
+If policy gate fails, terminal reward is forced to `0.0`.
 
-### Global realism constraints
+Core constraints enforced:
 
-- higher `return_rate` increases latent fraud risk
-- lower `return_rate` decreases latent fraud risk
-- higher `product_value` increases latent fraud risk
-- lower `product_value` decreases latent fraud risk
+- `APPROVE` is blocked on time/category violations.
+- `APPROVE` may be blocked in high-risk ambiguous cases without exception.
+- `REJECT` requires reason-code consistency with actual violation structure.
+- Fraud rejection is blocked when fraud signal is too low.
+- Rejecting clear low-fraud service-failure claims is blocked.
+- In ambiguous hard scenarios, direct finalization before evidence collection can
+  be blocked.
 
-### Policy modeling
+## Reward model
 
-Category policies include:
+After gate pass:
 
-- return window (days)
-- non-returnable categories
-- category-specific exceptions expressed in `policy_summary`
-
-Exception application is aligned with category policy text.
-
-## Task set and deterministic graders
-
-The environment defines three deterministic benchmark tasks:
-
-1. `easy_policy_compliance`
-2. `medium_balanced_judgment`
-3. `hard_conflicting_signals`
-
-Each task has:
-
-- fixed seed
-- explicit objective string
-- fixed success threshold
-
-Hard mode uses conflict-heavy, high-value templates and enforces evidence-driven
-handling in ambiguous cases.
-
-## Reward function
-
-Terminal reward is computed as:
-
-1. **Policy gate**: violation => reward `0.0`
-2. Component scoring (each independently bounded):
-   - `financial_score in [0,1]`
-   - `fraud_score in [0,1]`
-   - `efficiency_score in [0,1]`
-3. Weighted aggregate:
+1. Financial component:
 
 ```text
-reward = 0.5 * financial_score + 0.3 * fraud_score + 0.2 * efficiency_score
+financial_raw = cost_impact[action] + reason_bonus + trajectory_bonus
+financial_score = clamp01((financial_raw + 1.5) / 3.0)
 ```
 
-Additional shaping:
+2. Fraud component uses action-intent-risk-conditioned piecewise scoring.
 
-- positive/negative non-terminal reward on `REQUEST_INFO` depending on ambiguity
-- penalties for invalid step patterns
+3. Efficiency component:
 
-## Inference script and reproducibility
-
-Root `inference.py` is the submission baseline runner.
-
-### Required environment variables
-
-- `MODEL_NAME`
-- `HF_TOKEN` (or `OPENAI_API_KEY`)
-- `LOCAL_IMAGE_NAME` when using `from_docker_image()`
-
-Optional:
-
-- `API_BASE_URL` (default: `https://api.openai.com/v1`)
-- `ENV_BASE_URL` (remote environment endpoint)
-
-### LLM client requirement
-
-All LLM calls use:
-
-```python
-from openai import OpenAI
+```text
+efficiency = 1.0 - 0.20*(requested_info_used) - 0.30*(action==ESCALATE)
 ```
 
-with `api_key` and `base_url` derived from environment variables.
+4. Final reward:
 
-### STDOUT log contract
+```text
+reward = clamp01(
+    0.50 * financial_score
+  + 0.30 * fraud_score
+  + 0.20 * efficiency_score
+)
+```
 
-The script emits strict one-line records:
+Trajectory shaping:
+
+- positive bonus for requesting info in ambiguous cases
+- penalty for skipping info in ambiguous cases
+
+## Deterministic task set
+
+Tasks are fixed-name benchmarks with fixed seed and threshold:
+
+1. `easy_policy_compliance`:
+   - seed `111`
+   - threshold `0.75`
+2. `medium_balanced_judgment`:
+   - seed `222`
+   - threshold `0.68`
+3. `hard_conflicting_signals`:
+   - seed `333`
+   - threshold `0.74`
+
+Terminal `grader_success` is computed against the active task threshold.
+
+## Determinism and reproducibility
+
+- Uses `random.Random(seed)` for case generation.
+- Task mode pins seed unless an explicit seed override is passed.
+- No wall-clock dependence in generation or scoring.
+- `grader_score(action)` is deterministic for a fixed latent case.
+
+## Inference contract (`../inference.py`)
+
+Baseline runner enforces strict one-line logs:
 
 - `[START] task=<task> env=<benchmark> model=<model>`
 - `[STEP] step=<n> action=<action> reward=<r> done=<bool> error=<value|null>`
 - `[END] success=<bool> steps=<n> rewards=<r1,r2,...>`
 
-Rewards are formatted to two decimals.
+Action selection path uses environment-provided control hints:
 
-### Current deterministic baseline (default seeds)
+- `available_actions`
+- `reject_reason_codes`
+- `invalid_action` / `last_action_error`
 
-- `easy_policy_compliance`: `0.7997`
-- `medium_balanced_judgment`: `0.8871` (`0.08 + 0.8071` trajectory)
-- `hard_conflicting_signals`: `0.9750` (`0.08 + 0.8950` trajectory)
+This reduces invalid-action loops and keeps inference behavior aligned with
+runtime contract.
 
-## Setup and execution
+## Validation checklist
 
-### Local server
-
-```bash
-uvicorn server.app:app --host 0.0.0.0 --port 8000
-```
-
-### Docker build and run
-
-From `ecom/`:
+From repository root:
 
 ```bash
-docker build -t ecom-env:latest -f server/Dockerfile .
-docker run --rm -p 8000:8000 ecom-env:latest
+openenv validate ecom
+python -m pytest tests -q
+./validate-submission.sh <space-url> .
 ```
-
-Health check:
-
-```bash
-curl http://localhost:8000/health
-```
-
-### OpenEnv validation
 
 From `ecom/`:
 
 ```bash
 openenv validate .
-```
-
-From repository root (pre-check helper):
-
-```bash
-./validate-submission.sh <space-url> .
-```
-
-### Hugging Face deployment
-
-From `ecom/`:
-
-```bash
 openenv push
 ```
