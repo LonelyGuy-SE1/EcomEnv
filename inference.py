@@ -23,10 +23,6 @@ except Exception:  # pragma: no cover
     OpenAI = None  # type: ignore[assignment]
 
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-API_KEY = OPENAI_API_KEY or HF_TOKEN or os.getenv("API_KEY")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
@@ -336,6 +332,23 @@ def model_policy(
     return None
 
 
+def _build_llm_client() -> Any:
+    if OpenAI is None:
+        raise RuntimeError("openai package is required for inference")
+
+    try:
+        return OpenAI(
+            api_key=os.environ["API_KEY"],
+            base_url=os.environ["API_BASE_URL"],
+        )
+    except KeyError as exc:
+        missing = str(exc).strip('"')
+        raise RuntimeError(
+            f"Missing required environment variable: {missing}. "
+            "Set API_KEY and API_BASE_URL."
+        ) from exc
+
+
 async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
     rewards: List[float] = []
     steps_taken = 0
@@ -398,9 +411,7 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
 
 
 async def main() -> None:
-    client = None
-    if OpenAI is not None and API_KEY:
-        client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+    client = _build_llm_client()
 
     if not ENV_BASE_URL and not LOCAL_IMAGE_NAME:
         raise RuntimeError(

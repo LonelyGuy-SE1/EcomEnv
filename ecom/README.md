@@ -307,6 +307,13 @@ Action selection path uses environment-provided control hints:
 This reduces invalid-action loops and keeps inference behavior aligned with
 runtime contract.
 
+LLM proxy requirement for submission validation:
+
+- client initialization must use injected environment variables only:
+  - `api_key=os.environ["API_KEY"]`
+  - `base_url=os.environ["API_BASE_URL"]`
+- do not hardcode provider keys or bypass the injected proxy URL.
+
 ## Validation checklist
 
 From repository root:
