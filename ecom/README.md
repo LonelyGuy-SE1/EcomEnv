@@ -296,7 +296,7 @@ Baseline runner enforces strict one-line logs:
 
 - `[START] task=<task> env=<benchmark> model=<model>`
 - `[STEP] step=<n> action=<action> reward=<r> done=<bool> error=<value|null>`
-- `[END] success=<bool> steps=<n> rewards=<r1,r2,...>`
+- `[END] success=<bool> steps=<n> score=<score> rewards=<r1,r2,...>`
 
 Action selection path uses environment-provided control hints:
 

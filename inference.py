@@ -42,6 +42,7 @@ TASKS: List[str] = [
 class EpisodeOutcome:
     success: bool
     steps: int
+    score: float
     rewards: List[float]
 
 
@@ -60,11 +61,12 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     success_val = str(success).lower()
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
-        f"[END] success={success_val} steps={steps} rewards={rewards_str}", flush=True
+        f"[END] success={success_val} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
     )
 
 
@@ -352,6 +354,7 @@ def _build_llm_client() -> Any:
 async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
     rewards: List[float] = []
     steps_taken = 0
+    score = 0.0
     success = False
     env: Optional[Any] = None
 
@@ -394,7 +397,18 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
             )
 
             if done:
-                success = bool(result.observation.info.get("grader_success", False))
+                info = result.observation.info
+                if isinstance(info, dict):
+                    success = bool(info.get("grader_success", False))
+                    raw_score = info.get("grader_score", 0.0)
+                    try:
+                        score = float(raw_score)
+                    except (TypeError, ValueError):
+                        score = 0.0
+                else:
+                    success = False
+                    score = 0.0
+                score = max(0.0, min(1.0, score))
                 break
 
     except Exception:
@@ -405,9 +419,14 @@ async def run_task(task_name: str, client: Optional[Any]) -> EpisodeOutcome:
                 await env.close()
             except Exception:
                 pass
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
-    return EpisodeOutcome(success=success, steps=steps_taken, rewards=rewards)
+    return EpisodeOutcome(
+        success=success,
+        steps=steps_taken,
+        score=score,
+        rewards=rewards,
+    )
 
 
 async def main() -> None:
