@@ -84,3 +84,70 @@ def test_task_seed_is_deterministic_for_same_task_name() -> None:
     assert obs_a.days_since_purchase == obs_b.days_since_purchase
     assert obs_a.user_account_age_days == obs_b.user_account_age_days
     assert abs(obs_a.return_rate - obs_b.return_rate) < 1e-12
+
+
+def test_task_grader_success_thresholds_match_spec() -> None:
+    expected = {
+        "easy_policy_compliance": 0.75,
+        "medium_balanced_judgment": 0.68,
+        "hard_conflicting_signals": 0.74,
+    }
+
+    for task_name, threshold in expected.items():
+        env = EcomEnvironment(task_name=task_name)
+        env.reset()
+        obs = env.step(EcomAction(action_type="APPROVE"))
+        score = float(obs.info["grader_score"])
+        success = bool(obs.info["grader_success"])
+        assert success == (score >= threshold)
+
+
+def test_terminal_info_contains_decision_audit_with_counterfactuals() -> None:
+    env = EcomEnvironment(task_name="medium_balanced_judgment")
+
+    env.reset()
+    obs = env.step(EcomAction(action_type="APPROVE"))
+
+    assert obs.done is True
+    audit = obs.info.get("decision_audit")
+    assert isinstance(audit, dict)
+    assert isinstance(audit.get("chosen_action"), str)
+    assert isinstance(audit.get("chosen_reward"), float)
+    assert isinstance(audit.get("best_counterfactual_reward"), float)
+    assert isinstance(audit.get("decision_gap"), float)
+    assert 0.0 <= float(audit.get("chosen_reward")) <= 1.0
+    assert 0.0 <= float(audit.get("best_counterfactual_reward")) <= 1.0
+    assert 0.0 <= float(audit.get("decision_gap")) <= 1.0
+
+    counterfactual_rewards = audit.get("counterfactual_rewards")
+    assert isinstance(counterfactual_rewards, dict)
+    assert "APPROVE" in counterfactual_rewards
+    assert "ESCALATE" in counterfactual_rewards
+    assert "REJECT(TIME_EXPIRED)" in counterfactual_rewards
+    assert "REJECT(POLICY_VIOLATION)" in counterfactual_rewards
+    assert "REJECT(SUSPECTED_FRAUD)" in counterfactual_rewards
+
+    policy_flags = audit.get("policy_flags")
+    assert isinstance(policy_flags, dict)
+    assert isinstance(policy_flags.get("time_policy_violated"), bool)
+    assert isinstance(policy_flags.get("category_policy_violated"), bool)
+    assert isinstance(policy_flags.get("exception_applies"), bool)
+    assert isinstance(policy_flags.get("ambiguous_case"), bool)
+
+
+def test_timeout_path_contains_decision_audit() -> None:
+    env = EcomEnvironment(task_name="easy_policy_compliance")
+
+    env.reset()
+    env.step(EcomAction(action_type="REQUEST_INFO"))
+    env.step(EcomAction(action_type="REQUEST_INFO"))
+    env.step(EcomAction(action_type="REQUEST_INFO"))
+    env.step(EcomAction(action_type="REQUEST_INFO"))
+    timeout_obs = env.step(EcomAction(action_type="REQUEST_INFO"))
+
+    assert timeout_obs.done is True
+    assert timeout_obs.info.get("termination_reason") == "max_steps_exceeded"
+    audit = timeout_obs.info.get("decision_audit")
+    assert isinstance(audit, dict)
+    assert audit.get("chosen_action") == "NONE"
+    assert isinstance(audit.get("counterfactual_rewards"), dict)

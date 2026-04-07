@@ -327,6 +327,10 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 "grader_score": 0.0,
                 "grader_success": False,
                 "termination_reason": "max_steps_exceeded",
+                "decision_audit": self._timeout_decision_audit(
+                    self._visible_case,
+                    self._hidden_case,
+                ),
                 "available_actions": [],
                 "step_contract": "observation_reward_done_info",
             }
@@ -420,6 +424,12 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             "breakdown": breakdown,
             "grader_score": float(breakdown["normalized_reward"]),
             "grader_success": self._task_success(float(breakdown["normalized_reward"])),
+            "decision_audit": self._decision_audit(
+                action,
+                self._visible_case,
+                self._hidden_case,
+                float(breakdown["normalized_reward"]),
+            ),
             "step_contract": "observation_reward_done_info",
         }
         return self._to_observation(
@@ -462,6 +472,103 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             raise RuntimeError("Environment must be reset() before grader scoring")
         score, _ = self._evaluate(action, self._visible_case, self._hidden_case)
         return score
+
+    @staticmethod
+    def _action_label(action: EcomAction) -> str:
+        if action.reason_code is None:
+            return action.action_type
+        return f"{action.action_type}({action.reason_code})"
+
+    @staticmethod
+    def _risk_band(score: float) -> str:
+        if score < 0.30:
+            return "low"
+        if score < 0.60:
+            return "medium"
+        return "high"
+
+    @staticmethod
+    def _policy_flags(hidden: HiddenCaseState) -> Dict[str, bool]:
+        return {
+            "time_policy_violated": hidden.time_policy_violated,
+            "category_policy_violated": hidden.category_policy_violated,
+            "exception_applies": hidden.exception_applies,
+            "ambiguous_case": hidden.is_ambiguous,
+        }
+
+    def _counterfactual_rewards(
+        self,
+        visible: VisibleCase,
+        hidden: HiddenCaseState,
+    ) -> Dict[str, float]:
+        candidates = (
+            ("APPROVE", EcomAction(action_type="APPROVE")),
+            ("ESCALATE", EcomAction(action_type="ESCALATE")),
+            (
+                "REJECT(TIME_EXPIRED)",
+                EcomAction(action_type="REJECT", reason_code="TIME_EXPIRED"),
+            ),
+            (
+                "REJECT(POLICY_VIOLATION)",
+                EcomAction(action_type="REJECT", reason_code="POLICY_VIOLATION"),
+            ),
+            (
+                "REJECT(SUSPECTED_FRAUD)",
+                EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD"),
+            ),
+        )
+        rewards: Dict[str, float] = {}
+        for label, candidate in candidates:
+            score, _ = self._evaluate(candidate, visible, hidden)
+            rewards[label] = float(self._clamp01(score))
+        return rewards
+
+    def _decision_audit(
+        self,
+        action: EcomAction,
+        visible: VisibleCase,
+        hidden: HiddenCaseState,
+        chosen_reward: float,
+    ) -> Dict[str, Any]:
+        counterfactual_rewards = self._counterfactual_rewards(visible, hidden)
+        best_counterfactual_reward = (
+            max(counterfactual_rewards.values())
+            if counterfactual_rewards
+            else chosen_reward
+        )
+        chosen_reward = float(self._clamp01(chosen_reward))
+        best_counterfactual_reward = float(self._clamp01(best_counterfactual_reward))
+        return {
+            "chosen_action": self._action_label(action),
+            "chosen_reward": chosen_reward,
+            "best_counterfactual_reward": best_counterfactual_reward,
+            "decision_gap": float(
+                self._clamp01(best_counterfactual_reward - chosen_reward)
+            ),
+            "counterfactual_rewards": counterfactual_rewards,
+            "risk_band": self._risk_band(hidden.fraud_risk_score),
+            "policy_flags": self._policy_flags(hidden),
+        }
+
+    def _timeout_decision_audit(
+        self,
+        visible: VisibleCase,
+        hidden: HiddenCaseState,
+    ) -> Dict[str, Any]:
+        counterfactual_rewards = self._counterfactual_rewards(visible, hidden)
+        best_counterfactual_reward = (
+            max(counterfactual_rewards.values()) if counterfactual_rewards else 0.0
+        )
+        best_counterfactual_reward = float(self._clamp01(best_counterfactual_reward))
+        return {
+            "chosen_action": "NONE",
+            "chosen_reward": 0.0,
+            "best_counterfactual_reward": best_counterfactual_reward,
+            "decision_gap": best_counterfactual_reward,
+            "counterfactual_rewards": counterfactual_rewards,
+            "risk_band": self._risk_band(hidden.fraud_risk_score),
+            "policy_flags": self._policy_flags(hidden),
+        }
 
     def get_metadata(self) -> "EnvironmentMetadata":
         from openenv.core.env_server.types import EnvironmentMetadata

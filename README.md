@@ -148,6 +148,7 @@ Common keys by phase:
   - `breakdown`
   - `grader_score`
   - `grader_success`
+  - `decision_audit`
 - Invalid action paths:
   - `invalid_action` (stable machine code)
   - `last_action_error` (same machine code)
@@ -267,6 +268,30 @@ Trajectory shaping:
 - positive bonus for requesting info in ambiguous cases
 - penalty for skipping info in ambiguous cases
 
+## Creative evaluator features
+
+To improve real-world utility and exploit resistance during review, terminal
+responses include a deterministic decision audit payload.
+
+`info.decision_audit` includes:
+
+- `chosen_action`
+- `chosen_reward`
+- `best_counterfactual_reward`
+- `decision_gap`
+- `counterfactual_rewards` for:
+  - `APPROVE`
+  - `ESCALATE`
+  - `REJECT(TIME_EXPIRED)`
+  - `REJECT(POLICY_VIOLATION)`
+  - `REJECT(SUSPECTED_FRAUD)`
+- `risk_band` (`low|medium|high`)
+- `policy_flags` (`time_policy_violated`, `category_policy_violated`,
+  `exception_applies`, `ambiguous_case`)
+
+This creates a transparent, machine-checkable explanation surface without
+changing reward determinism.
+
 ## Deterministic task set
 
 Tasks are fixed-name benchmarks with fixed seed and threshold:
@@ -313,6 +338,17 @@ LLM proxy requirement for submission validation:
   - `api_key=os.environ["API_KEY"]`
   - `base_url=os.environ["API_BASE_URL"]`
 - do not hardcode provider keys or bypass the injected proxy URL.
+
+Exploit-hardening and evaluation integrity notes:
+
+- `step()` before `reset()` does not execute the supplied action; it returns
+  initial state with machine-readable error codes.
+- post-terminal `step()` calls return terminal state with `reward=0.0` and
+  explicit terminal error code, preventing undefined behavior loops.
+- invalid-action branches emit stable machine codes and explicit
+  `available_actions` / `reject_reason_codes` to avoid parser ambiguity.
+- task grading is deterministic with fixed seeds and fixed success thresholds;
+  no hidden stochastic post-processing in scoring.
 
 ## Validation checklist
 
