@@ -14,27 +14,10 @@ from openai import OpenAI
 
 from ecom import EcomAction, EcomEnv
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-API_KEY = os.getenv("API_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")
-IMAGE_NAME = os.getenv("IMAGE_NAME") or os.getenv("LOCAL_IMAGE_NAME")
-ENV_BASE_URL = os.getenv("ENV_BASE_URL")
-MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-BENCHMARK = os.getenv("ECOM_BENCHMARK", "ecom_returns_decision")
-TASK_NAME = os.getenv("ECOM_TASK_NAME") or os.getenv("ECOM_TASK")
+BENCHMARK = "ecom_returns_decision"
 MAX_STEPS = 5
 TEMPERATURE = 0
 MAX_TOKENS = 180
-
-TASKS: List[str] = (
-    [TASK_NAME]
-    if TASK_NAME
-    else [
-        "easy_policy_compliance",
-        "medium_balanced_judgment",
-        "hard_conflicting_signals",
-    ]
-)
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
@@ -55,6 +38,29 @@ SYSTEM_PROMPT = textwrap.dedent(
     Output JSON only. No prose, no markdown.
     """
 ).strip()
+
+
+def _model_name() -> str:
+    return os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+
+
+def _image_name() -> Optional[str]:
+    return os.getenv("IMAGE_NAME") or os.getenv("LOCAL_IMAGE_NAME")
+
+
+def _env_base_url() -> Optional[str]:
+    return os.getenv("ENV_BASE_URL")
+
+
+def _task_names() -> List[str]:
+    task_name = os.getenv("ECOM_TASK_NAME") or os.getenv("ECOM_TASK")
+    if task_name:
+        return [task_name]
+    return [
+        "easy_policy_compliance",
+        "medium_balanced_judgment",
+        "hard_conflicting_signals",
+    ]
 
 
 @dataclass
@@ -80,10 +86,10 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
         flush=True,
     )
 
@@ -311,7 +317,7 @@ def get_model_action(
 
     try:
         completion = client.chat.completions.create(
-            model=MODEL_NAME,
+            model=_model_name(),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -351,22 +357,20 @@ def get_model_action(
 
 
 def _build_llm_client() -> OpenAI:
-    api_key = API_KEY or HF_TOKEN
-    base_url = API_BASE_URL
-
-    if not api_key:
-        raise RuntimeError(
-            "Missing required environment variable: API_KEY or HF_TOKEN. "
-            "Set the injected API_KEY for submission, or HF_TOKEN for local testing."
-        )
-
-    return OpenAI(base_url=base_url, api_key=api_key)
+    api_base_url = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token is None:
+        raise RuntimeError("HF_TOKEN environment variable is required.")
+    return OpenAI(
+        base_url=api_base_url,
+        api_key=hf_token,
+    )
 
 
 def _probe_llm_proxy(client: OpenAI) -> None:
     try:
         client.chat.completions.create(
-            model=MODEL_NAME,
+            model=_model_name(),
             messages=[
                 {"role": "system", "content": "Reply with OK."},
                 {"role": "user", "content": "OK"},
@@ -377,7 +381,7 @@ def _probe_llm_proxy(client: OpenAI) -> None:
         )
     except Exception as exc:
         raise RuntimeError(
-            "Failed to make an LLM request through API_BASE_URL with API_KEY."
+            "Failed to make an LLM request through API_BASE_URL with HF_TOKEN."
         ) from exc
 
 
@@ -389,18 +393,21 @@ async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
     success = False
     env: Optional[EcomEnv] = None
 
-    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_name, env=BENCHMARK, model=_model_name())
 
     try:
-        if ENV_BASE_URL:
-            env = EcomEnv(base_url=ENV_BASE_URL)
+        env_base_url = _env_base_url()
+        image_name = _image_name()
+
+        if env_base_url:
+            env = EcomEnv(base_url=env_base_url)
             await env.connect()
         else:
-            if not IMAGE_NAME:
+            if not image_name:
                 raise RuntimeError(
                     "IMAGE_NAME or LOCAL_IMAGE_NAME is required when ENV_BASE_URL is not set"
                 )
-            env = await EcomEnv.from_docker_image(IMAGE_NAME)
+            env = await EcomEnv.from_docker_image(image_name)
 
         result = await env.reset(task_name=task_name)
 
@@ -452,7 +459,7 @@ async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
                 await env.close()
             except Exception:
                 pass
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(success=success, steps=steps_taken, rewards=rewards)
 
     return EpisodeOutcome(
         success=success,
@@ -466,12 +473,12 @@ async def main() -> None:
     client = _build_llm_client()
     _probe_llm_proxy(client)
 
-    if not ENV_BASE_URL and not IMAGE_NAME:
+    if not _env_base_url() and not _image_name():
         raise RuntimeError(
             "Set ENV_BASE_URL or IMAGE_NAME/LOCAL_IMAGE_NAME before running inference.py"
         )
 
-    for task_name in TASKS:
+    for task_name in _task_names():
         await run_task(task_name, client)
 
 

@@ -76,54 +76,8 @@ def test_build_llm_client_uses_injected_proxy_env(
             captured["base_url"] = base_url
 
     monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.setenv("API_KEY", "proxy-token")
-    monkeypatch.setenv("API_BASE_URL", "https://proxy.example/v1")
-    monkeypatch.setattr(inference, "API_KEY", "proxy-token")
-    monkeypatch.setattr(inference, "HF_TOKEN", None)
-    monkeypatch.setattr(inference, "API_BASE_URL", "https://proxy.example/v1")
-
-    client = _build_llm_client()
-
-    assert isinstance(client, DummyOpenAI)
-    assert captured["api_key"] == "proxy-token"
-    assert captured["base_url"] == "https://proxy.example/v1"
-
-
-def test_build_llm_client_fails_without_required_proxy_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class DummyOpenAI:
-        def __init__(self, *, api_key: str, base_url: str):
-            self.api_key = api_key
-            self.base_url = base_url
-
-    monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.delenv("API_KEY", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.setattr(inference, "API_KEY", None)
-    monkeypatch.setattr(inference, "HF_TOKEN", None)
-
-    with pytest.raises(RuntimeError, match="API_KEY or HF_TOKEN"):
-        _build_llm_client()
-
-
-def test_build_llm_client_accepts_hf_token_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured = {}
-
-    class DummyOpenAI:
-        def __init__(self, *, api_key: str, base_url: str):
-            captured["api_key"] = api_key
-            captured["base_url"] = base_url
-
-    monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setenv("HF_TOKEN", "hf-proxy-token")
     monkeypatch.setenv("API_BASE_URL", "https://proxy.example/v1")
-    monkeypatch.setattr(inference, "API_KEY", None)
-    monkeypatch.setattr(inference, "HF_TOKEN", "hf-proxy-token")
-    monkeypatch.setattr(inference, "API_BASE_URL", "https://proxy.example/v1")
 
     client = _build_llm_client()
 
@@ -132,28 +86,20 @@ def test_build_llm_client_accepts_hf_token_fallback(
     assert captured["base_url"] == "https://proxy.example/v1"
 
 
-def test_build_llm_client_prefers_api_key_over_hf_token(
+def test_build_llm_client_fails_without_hf_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = {}
-
     class DummyOpenAI:
         def __init__(self, *, api_key: str, base_url: str):
-            captured["api_key"] = api_key
-            captured["base_url"] = base_url
+            self.api_key = api_key
+            self.base_url = base_url
 
     monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.setenv("API_KEY", "proxy-token")
-    monkeypatch.setenv("HF_TOKEN", "hf-token")
-    monkeypatch.setenv("API_BASE_URL", "https://proxy.example/v1")
-    monkeypatch.setattr(inference, "API_KEY", "proxy-token")
-    monkeypatch.setattr(inference, "HF_TOKEN", "hf-token")
-    monkeypatch.setattr(inference, "API_BASE_URL", "https://proxy.example/v1")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("API_BASE_URL", raising=False)
 
-    _build_llm_client()
-
-    assert captured["api_key"] == "proxy-token"
-    assert captured["base_url"] == "https://proxy.example/v1"
+    with pytest.raises(RuntimeError, match="HF_TOKEN"):
+        _build_llm_client()
 
 
 def test_build_llm_client_uses_default_api_base_url(
@@ -167,14 +113,23 @@ def test_build_llm_client_uses_default_api_base_url(
             captured["base_url"] = base_url
 
     monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.setattr(inference, "API_KEY", "proxy-token")
-    monkeypatch.setattr(inference, "HF_TOKEN", None)
-    monkeypatch.setattr(inference, "API_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "hf-proxy-token")
+    monkeypatch.delenv("API_BASE_URL", raising=False)
 
-    _build_llm_client()
+    client = _build_llm_client()
 
-    assert captured["api_key"] == "proxy-token"
+    assert isinstance(client, DummyOpenAI)
+    assert captured["api_key"] == "hf-proxy-token"
     assert captured["base_url"] == "https://api.openai.com/v1"
+
+
+def test_model_name_reads_environment_at_call_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL_NAME", "gpt-test-model")
+
+    assert inference._model_name() == "gpt-test-model"
 
 
 def test_probe_llm_proxy_makes_chat_completion_request() -> None:
@@ -195,7 +150,7 @@ def test_probe_llm_proxy_makes_chat_completion_request() -> None:
 
     _probe_llm_proxy(DummyClient())
 
-    assert captured["model"] == inference.MODEL_NAME
+    assert captured["model"] == inference._model_name()
     assert captured["stream"] is False
     assert captured["max_tokens"] == 2
 
@@ -204,12 +159,14 @@ def test_inference_runner_allows_timeout_recovery_step() -> None:
     assert inference.MAX_STEPS == 5
 
 
-def test_log_end_includes_score_field(capsys: pytest.CaptureFixture[str]) -> None:
-    log_end(success=True, steps=2, score=0.73, rewards=[0.08, 0.65])
+def test_log_end_uses_required_format_without_score(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_end(success=True, steps=2, rewards=[0.08, 0.65])
     out = capsys.readouterr().out.strip()
 
     assert out.startswith("[END] ")
     assert "success=true" in out
     assert "steps=2" in out
-    assert "score=0.73" in out
+    assert "score=" not in out
     assert out.endswith("rewards=0.08,0.65")
