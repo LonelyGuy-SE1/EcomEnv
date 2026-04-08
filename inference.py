@@ -357,13 +357,11 @@ def get_model_action(
 
 
 def _build_llm_client() -> OpenAI:
-    api_base_url = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-    hf_token = os.getenv("HF_TOKEN")
-    if hf_token is None:
-        raise RuntimeError("HF_TOKEN environment variable is required.")
+    api_base_url = os.environ["API_BASE_URL"]
+    api_key = os.environ["API_KEY"]
     return OpenAI(
         base_url=api_base_url,
-        api_key=hf_token,
+        api_key=api_key,
     )
 
 

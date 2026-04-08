@@ -76,17 +76,17 @@ def test_build_llm_client_uses_injected_proxy_env(
             captured["base_url"] = base_url
 
     monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.setenv("HF_TOKEN", "hf-proxy-token")
+    monkeypatch.setenv("API_KEY", "proxy-token")
     monkeypatch.setenv("API_BASE_URL", "https://proxy.example/v1")
 
     client = _build_llm_client()
 
     assert isinstance(client, DummyOpenAI)
-    assert captured["api_key"] == "hf-proxy-token"
+    assert captured["api_key"] == "proxy-token"
     assert captured["base_url"] == "https://proxy.example/v1"
 
 
-def test_build_llm_client_fails_without_hf_token(
+def test_build_llm_client_fails_without_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class DummyOpenAI:
@@ -95,33 +95,27 @@ def test_build_llm_client_fails_without_hf_token(
             self.base_url = base_url
 
     monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
-    monkeypatch.delenv("API_BASE_URL", raising=False)
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setenv("API_BASE_URL", "https://proxy.example/v1")
 
-    with pytest.raises(RuntimeError, match="HF_TOKEN"):
+    with pytest.raises(KeyError, match="API_KEY"):
         _build_llm_client()
 
 
-def test_build_llm_client_uses_default_api_base_url(
+def test_build_llm_client_fails_without_api_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured = {}
-
     class DummyOpenAI:
         def __init__(self, *, api_key: str, base_url: str):
-            captured["api_key"] = api_key
-            captured["base_url"] = base_url
+            self.api_key = api_key
+            self.base_url = base_url
 
     monkeypatch.setattr(inference, "OpenAI", DummyOpenAI)
-    monkeypatch.delenv("API_KEY", raising=False)
-    monkeypatch.setenv("HF_TOKEN", "hf-proxy-token")
+    monkeypatch.setenv("API_KEY", "proxy-token")
     monkeypatch.delenv("API_BASE_URL", raising=False)
 
-    client = _build_llm_client()
-
-    assert isinstance(client, DummyOpenAI)
-    assert captured["api_key"] == "hf-proxy-token"
-    assert captured["base_url"] == "https://api.openai.com/v1"
+    with pytest.raises(KeyError, match="API_BASE_URL"):
+        _build_llm_client()
 
 
 def test_model_name_reads_environment_at_call_time(
