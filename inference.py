@@ -86,10 +86,10 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{reward:.2f}" for reward in rewards)
     print(
-        f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}",
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -357,12 +357,33 @@ def get_model_action(
 
 
 def _build_llm_client() -> OpenAI:
-    api_base_url = os.environ["API_BASE_URL"]
-    api_key = os.environ["API_KEY"]
+    api_base_url = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+    api_key = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+    if not api_key:
+        raise RuntimeError("HF_TOKEN or API_KEY environment variable is required.")
     return OpenAI(
         base_url=api_base_url,
         api_key=api_key,
     )
+
+
+def _probe_llm_proxy(client: OpenAI) -> None:
+    try:
+        client.chat.completions.create(
+            model=_model_name(),
+            messages=[
+                {"role": "system", "content": "Reply with OK."},
+                {"role": "user", "content": "OK"},
+            ],
+            temperature=0,
+            max_tokens=2,
+            stream=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to make an LLM request through API_BASE_URL using HF_TOKEN/API_KEY."
+        ) from exc
+
 
 async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
     history: List[str] = []
@@ -438,7 +459,7 @@ async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
                 await env.close()
             except Exception:
                 pass
-        log_end(success=success, steps=steps_taken, rewards=rewards)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return EpisodeOutcome(
         success=success,
@@ -450,6 +471,7 @@ async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
 
 async def main() -> None:
     client = _build_llm_client()
+    _probe_llm_proxy(client)
 
     if not _env_base_url() and not _image_name():
         raise RuntimeError(
