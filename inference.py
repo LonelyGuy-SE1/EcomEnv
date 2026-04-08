@@ -364,25 +364,6 @@ def _build_llm_client() -> OpenAI:
         api_key=api_key,
     )
 
-
-def _probe_llm_proxy(client: OpenAI) -> None:
-    try:
-        client.chat.completions.create(
-            model=_model_name(),
-            messages=[
-                {"role": "system", "content": "Reply with OK."},
-                {"role": "user", "content": "OK"},
-            ],
-            temperature=0,
-            max_tokens=2,
-            stream=False,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            "Failed to make an LLM request through API_BASE_URL with HF_TOKEN."
-        ) from exc
-
-
 async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
     history: List[str] = []
     rewards: List[float] = []
@@ -469,7 +450,6 @@ async def run_task(task_name: str, client: OpenAI) -> EpisodeOutcome:
 
 async def main() -> None:
     client = _build_llm_client()
-    _probe_llm_proxy(client)
 
     if not _env_base_url() and not _image_name():
         raise RuntimeError(
