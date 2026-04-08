@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from ecom.models import EcomAction
+from ecom.server.app import _normalize_mode, _optional_float_env
 from ecom.server.ecom_environment import EcomEnvironment
 
 
@@ -151,3 +154,57 @@ def test_timeout_path_contains_decision_audit() -> None:
     assert isinstance(audit, dict)
     assert audit.get("chosen_action") == "NONE"
     assert isinstance(audit.get("counterfactual_rewards"), dict)
+
+
+def test_request_info_revealed_lists_return_rate() -> None:
+    env = EcomEnvironment(task_name="medium_balanced_judgment")
+
+    env.reset()
+    obs = env.step(EcomAction(action_type="REQUEST_INFO"))
+
+    assert obs.done is False
+    assert "return_rate" in obs.info.get("revealed", [])
+
+
+def test_breakdown_optimal_action_matches_best_legal_counterfactual() -> None:
+    env = EcomEnvironment(mode="medium")
+
+    env.reset(seed=0)
+    obs = env.step(EcomAction(action_type="ESCALATE"))
+
+    assert obs.done is True
+    breakdown = obs.info.get("breakdown")
+    assert isinstance(breakdown, dict)
+    assert breakdown.get("optimal_action") == "ESCALATE"
+    assert breakdown.get("matched_optimal") is True
+
+    audit = obs.info.get("decision_audit")
+    assert isinstance(audit, dict)
+    assert audit.get("best_counterfactual_reward") == audit.get("chosen_reward")
+
+
+def test_breakdown_uses_null_optimal_action_when_no_legal_terminal_action_exists() -> None:
+    env = EcomEnvironment(task_name="hard_conflicting_signals")
+
+    env.reset()
+    obs = env.step(EcomAction(action_type="APPROVE"))
+
+    assert obs.done is True
+    breakdown = obs.info.get("breakdown")
+    assert isinstance(breakdown, dict)
+    assert breakdown.get("optimal_action") is None
+    assert breakdown.get("matched_optimal") is False
+
+
+def test_normalize_mode_defaults_invalid_values() -> None:
+    assert _normalize_mode("hard") == "hard"
+    assert _normalize_mode("invalid") == "medium"
+
+
+def test_optional_float_env_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ECOM_FRAUD_PROBABILITY", "not-a-number")
+
+    with pytest.raises(RuntimeError, match="ECOM_FRAUD_PROBABILITY"):
+        _optional_float_env("ECOM_FRAUD_PROBABILITY")

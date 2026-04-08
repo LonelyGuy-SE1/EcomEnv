@@ -4,6 +4,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+ecom/.venv/
 venv/
 
 # Packaging/build artifacts
@@ -16,6 +17,8 @@ dist/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+ecom/outputs/*
+!ecom/outputs/.gitkeep
 
 # OS files
 .DS_Store

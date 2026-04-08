@@ -56,7 +56,7 @@ class PolicyProfile:
 class HiddenCaseState:
     fraud_risk_score: float
     true_intent: Intent
-    optimal_action: FinalAction
+    optimal_action: Optional[str]
     cost_impact: Dict[str, float]
     category_policy_violated: bool
     time_policy_violated: bool
@@ -374,7 +374,11 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             info_gain_reward = 0.08 if self._hidden_case.is_ambiguous else -0.03
             info = {
                 "phase": "post_request_info",
-                "revealed": ["product_condition_notes", "return_reason"],
+                "revealed": [
+                    "product_condition_notes",
+                    "return_reason",
+                    "return_rate",
+                ],
                 "available_actions": ["APPROVE", "REJECT", "ESCALATE"],
                 "reject_reason_codes": [
                     "TIME_EXPIRED",
@@ -496,12 +500,9 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             "ambiguous_case": hidden.is_ambiguous,
         }
 
-    def _counterfactual_rewards(
-        self,
-        visible: VisibleCase,
-        hidden: HiddenCaseState,
-    ) -> Dict[str, float]:
-        candidates = (
+    @staticmethod
+    def _candidate_actions() -> tuple[tuple[str, EcomAction], ...]:
+        return (
             ("APPROVE", EcomAction(action_type="APPROVE")),
             ("ESCALATE", EcomAction(action_type="ESCALATE")),
             (
@@ -517,9 +518,45 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 EcomAction(action_type="REJECT", reason_code="SUSPECTED_FRAUD"),
             ),
         )
+
+    def _best_counterfactual(
+        self,
+        visible: VisibleCase,
+        hidden: HiddenCaseState,
+        *,
+        preferred_label: Optional[str] = None,
+    ) -> tuple[Optional[str], float]:
+        best_labels: list[str] = []
+        best_reward = 0.0
+
+        for label, candidate in self._candidate_actions():
+            score, reward_model = self._score_action(candidate, visible, hidden)
+            if reward_model.policy_violation:
+                continue
+
+            score = float(self._clamp01(score))
+            if not best_labels or score > best_reward + 1e-12:
+                best_labels = [label]
+                best_reward = score
+            elif abs(score - best_reward) <= 1e-12:
+                best_labels.append(label)
+
+        if not best_labels:
+            return None, 0.0
+
+        if preferred_label is not None and preferred_label in best_labels:
+            return preferred_label, best_reward
+
+        return best_labels[0], best_reward
+
+    def _counterfactual_rewards(
+        self,
+        visible: VisibleCase,
+        hidden: HiddenCaseState,
+    ) -> Dict[str, float]:
         rewards: Dict[str, float] = {}
-        for label, candidate in candidates:
-            score, _ = self._evaluate(candidate, visible, hidden)
+        for label, candidate in self._candidate_actions():
+            score, _ = self._score_action(candidate, visible, hidden)
             rewards[label] = float(self._clamp01(score))
         return rewards
 
@@ -708,18 +745,18 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             time_violation=time_policy_violated,
             return_reason=return_reason,
         )
-        optimal_action = self._argmax_action(financial_scores)
 
         hidden = HiddenCaseState(
             fraud_risk_score=fraud_risk_score,
             true_intent=true_intent,
-            optimal_action=optimal_action,
+            optimal_action=None,
             cost_impact=financial_scores,
             category_policy_violated=category_policy_violated,
             time_policy_violated=time_policy_violated,
             exception_applies=exception_applies,
             is_ambiguous=is_ambiguous or is_conflicting,
         )
+        hidden.optimal_action, _ = self._best_counterfactual(visible, hidden)
         return visible, hidden
 
     def _generate_hard_case(self, rng) -> tuple[VisibleCase, HiddenCaseState]:
@@ -797,23 +834,17 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             return_reason=return_reason,
         )
 
-        if time_policy_violated or category_policy_violated:
-            optimal_action: FinalAction = "REJECT"
-        elif true_intent == "abusive" and fraud_risk_score >= 0.50:
-            optimal_action = "REJECT"
-        else:
-            optimal_action = self._argmax_action(financial_scores)
-
         hidden = HiddenCaseState(
             fraud_risk_score=fraud_risk_score,
             true_intent=true_intent,
-            optimal_action=optimal_action,
+            optimal_action=None,
             cost_impact=financial_scores,
             category_policy_violated=category_policy_violated,
             time_policy_violated=time_policy_violated,
             exception_applies=exception_applies,
             is_ambiguous=True,
         )
+        hidden.optimal_action, _ = self._best_counterfactual(visible, hidden)
         return visible, hidden
 
     @staticmethod
@@ -899,16 +930,12 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             "ESCALATE": escalate_gain,
         }
 
-    @staticmethod
-    def _argmax_action(scores: Dict[FinalAction, float]) -> FinalAction:
-        return max(scores.keys(), key=lambda k: scores[k])
-
-    def _evaluate(
+    def _score_action(
         self,
         action: EcomAction,
         visible: VisibleCase,
         hidden: HiddenCaseState,
-    ) -> tuple[float, Dict[str, Any]]:
+    ) -> tuple[float, EcomReward]:
         policy_ok = self._policy_gate(action, visible, hidden)
         if not policy_ok:
             reward_model = EcomReward(
@@ -919,7 +946,7 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
                 normalized_reward=0.0,
                 policy_violation=True,
             )
-            return 0.0, reward_model.model_dump()
+            return 0.0, reward_model
 
         final_action = action.action_type
         if final_action == "REJECT":
@@ -966,10 +993,27 @@ class EcomEnvironment(Environment[EcomAction, EcomObservation, State]):
             efficiency_score=efficiency_score,
             normalized_reward=final_reward,
             policy_violation=False,
-            optimal_action=hidden.optimal_action,
-            matched_optimal=final_action == hidden.optimal_action,
         )
-        return final_reward, reward_model.model_dump()
+        return final_reward, reward_model
+
+    def _evaluate(
+        self,
+        action: EcomAction,
+        visible: VisibleCase,
+        hidden: HiddenCaseState,
+    ) -> tuple[float, Dict[str, Any]]:
+        reward, reward_model = self._score_action(action, visible, hidden)
+        chosen_label = self._action_label(action)
+        optimal_action, optimal_reward = self._best_counterfactual(
+            visible,
+            hidden,
+            preferred_label=chosen_label,
+        )
+        reward_model.optimal_action = optimal_action
+        reward_model.matched_optimal = (
+            optimal_action is not None and abs(reward - optimal_reward) <= 1e-12
+        )
+        return reward, reward_model.model_dump()
 
     def _policy_gate(
         self,

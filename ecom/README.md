@@ -81,6 +81,9 @@ Terminal breakdown keys:
 - `matched_optimal`
 
 All numeric reward components are bounded to `[0,1]`.
+`optimal_action` is the highest-scoring legal terminal action label, such as
+`APPROVE`, `ESCALATE`, or `REJECT(<REASON>)`; it may be `null` when no legal
+terminal action exists from the current state.
 
 ## Episode protocol
 

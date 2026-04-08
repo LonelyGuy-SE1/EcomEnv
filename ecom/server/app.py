@@ -20,22 +20,34 @@ from ecom.models import EcomAction, EcomObservation
 from ecom.server.ecom_environment import EcomEnvironment
 
 
-def _env_factory() -> EcomEnvironment:
-    mode = os.getenv("ECOM_MODE", "medium").strip().lower()
+def _normalize_mode(raw_mode: str) -> str:
+    mode = raw_mode.strip().lower()
     if mode not in {"easy", "medium", "hard"}:
-        mode = "medium"
+        return "medium"
+    return mode
 
-    def _maybe_float(name: str) -> float | None:
-        raw = os.getenv(name)
-        if raw is None or raw.strip() == "":
-            return None
+
+def _optional_float_env(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+
+    try:
         return float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable {name} must be a float, got {raw!r}."
+        ) from exc
+
+
+def _env_factory() -> EcomEnvironment:
+    mode = _normalize_mode(os.getenv("ECOM_MODE", "medium"))
 
     return EcomEnvironment(
         mode=mode,
-        fraud_probability=_maybe_float("ECOM_FRAUD_PROBABILITY"),
-        ambiguity_rate=_maybe_float("ECOM_AMBIGUITY_RATE"),
-        conflict_rate=_maybe_float("ECOM_CONFLICT_RATE"),
+        fraud_probability=_optional_float_env("ECOM_FRAUD_PROBABILITY"),
+        ambiguity_rate=_optional_float_env("ECOM_AMBIGUITY_RATE"),
+        conflict_rate=_optional_float_env("ECOM_CONFLICT_RATE"),
     )
 
 
